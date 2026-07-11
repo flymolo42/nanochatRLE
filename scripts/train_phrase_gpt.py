@@ -172,10 +172,10 @@ def _phrase_boundary_positions(token_records):
     return sorted(set(boundaries))
 
 
-def _hybrid_steps_at_split(token_records, split):
+def _hybrid_steps_at_split(token_records, split, reset_on_clause=True):
     front = token_records[:split]
     back = token_records[split:]
-    chains = _chains_from_token_records(front, reset_on_clause=True)
+    chains = _chains_from_token_records(front, reset_on_clause=reset_on_clause)
     # each back token becomes its own length-1 chain (1-hot); extend with one-element lists
     chains.extend([int(record["indices"][0])] for record in back if record.get("indices"))
     return _steps_from_chains(chains)
@@ -185,14 +185,14 @@ def _choose_split(boundaries, seed, story_id):
     return random.Random(seed * 1_000_003 + int(story_id)).choice(boundaries)
 
 
-def _hybrid_steps(records, seed):
+def _hybrid_steps(records, seed, reset_on_clause=True):
     token_records = _canonical_token_stream(records)
     if not token_records:
         return []
     story_id = int(token_records[0].get("story_id", 0))
     boundaries = _phrase_boundary_positions(token_records)
     split = _choose_split(boundaries, seed, story_id)
-    return _hybrid_steps_at_split(token_records, split)
+    return _hybrid_steps_at_split(token_records, split, reset_on_clause=reset_on_clause)
 
 
 def _chunk_steps_into_examples(steps, sequence_len):
@@ -212,6 +212,7 @@ CHAIN_MODE_BUILDERS = {
     "phrase": lambda records, seed: _chain_steps(records, reset_on_clause=True),
     "cross-phrase": lambda records, seed: _chain_steps(records, reset_on_clause=False),
     "hybrid": lambda records, seed: _hybrid_steps(records, seed),
+    "hybrid-cross": lambda records, seed: _hybrid_steps(records, seed, reset_on_clause=False),
 }
 
 
@@ -610,6 +611,8 @@ def parse_args():
     parser.add_argument("--device", default="")
     parser.add_argument("--sweep-eval-records", default=None, help="Held-out records for in-training sweep eval (enables it).")
     parser.add_argument("--sweep-eval-split", default=None, help="Restrict sweep probes to this split, e.g. 'validation'.")
+    parser.add_argument("--sweep-index-map", default=None, help="old_to_new.json applied to sweep-eval record indices (use when shards were built with --index-map).")
+    parser.add_argument("--sweep-cross-clause", action="store_true", help="Build sweep probe history with cross-clause chains (match hybrid-cross shards).")
     parser.add_argument("--sweep-eval-every-epochs", type=int, default=1)
     parser.add_argument("--sweep-eval-every-shards", type=int, default=0)
     parser.add_argument("--sweep-x-values", default="0,1,2,4,8,16")
@@ -632,6 +635,7 @@ def _run_training_sweep(model, probes, args, remap, device, epoch, shard, trajec
             fixed_x_for_depth=0, remap=remap,
             batch_size=args.sweep_batch_size, device=device,
             bootstrap=args.sweep_bootstrap, bootstrap_seed=args.sweep_seed,
+            reset_on_clause=not getattr(args, "sweep_cross_clause", False),
         )
         result["split"] = args.sweep_eval_split
         trajectory.append({"epoch": epoch, "shard": shard, "sweep": result})
@@ -758,9 +762,13 @@ def main():
     sweep_probes = None
     if args.sweep_eval_records:
         from scripts.hybrid_sweep import build_sweep_probes  # lazy: avoids import cycle
+        sweep_index_map = None
+        if args.sweep_index_map:
+            with open(args.sweep_index_map, "r", encoding="utf-8") as file:
+                sweep_index_map = json.load(file)
         sweep_probes = build_sweep_probes(iter_records(args.sweep_eval_records),
                                           min_history=1, max_probes=args.sweep_max_probes,
-                                          split=args.sweep_eval_split)
+                                          split=args.sweep_eval_split, index_map=sweep_index_map)
         if not sweep_probes:
             raise SystemExit("--sweep-eval-records produced 0 probes (check --sweep-eval-split / path)")
         print(f"sweep eval: {len(sweep_probes)} probes from {args.sweep_eval_records} (split={args.sweep_eval_split})", flush=True)

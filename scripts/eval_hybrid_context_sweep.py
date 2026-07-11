@@ -31,14 +31,20 @@ def parse_args():
     parser.add_argument("--bootstrap", type=int, default=1000, help="Bootstrap resamples for CIs; 0 disables.")
     parser.add_argument("--sweep-seed", type=int, default=0, help="Seed for bootstrap CIs.")
     parser.add_argument("--device", default="")
+    parser.add_argument("--index-map", default=None, help="old_to_new.json applied to record indices (use when the checkpoint was trained on reordered shards).")
+    parser.add_argument("--cross-clause", action="store_true", help="Build probe history with cross-clause chains (match hybrid-cross training).")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     device = choose_device(args.device)
+    index_map = None
+    if args.index_map:
+        with open(args.index_map, "r", encoding="utf-8") as file:
+            index_map = json.load(file)
     probes = build_sweep_probes(iter_records(args.records), min_history=args.min_history,
-                                max_probes=args.max_probes, split=args.split)
+                                max_probes=args.max_probes, split=args.split, index_map=index_map)
     if not probes:
         raise SystemExit("No probes found.")
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
@@ -53,7 +59,8 @@ def main():
     d_values = _parse_int_list(args.d_values) + [None]
     result = run_sweep(model, probes, x_values=_parse_int_list(args.x_values), d_values=d_values,
                        fixed_x_for_depth=args.fixed_x_for_depth, remap=remap, batch_size=args.batch_size,
-                       device=device, bootstrap=args.bootstrap, bootstrap_seed=args.sweep_seed)
+                       device=device, bootstrap=args.bootstrap, bootstrap_seed=args.sweep_seed,
+                       reset_on_clause=not args.cross_clause)
     result["split"] = args.split
     print(json.dumps(result, indent=2))
 

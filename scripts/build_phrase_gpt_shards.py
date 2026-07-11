@@ -155,7 +155,7 @@ def parse_args():
     parser.add_argument("--examples-per-shard", type=int, default=50000)
     parser.add_argument("--progress-every", type=int, default=100000)
     parser.add_argument("--limit-examples", type=int, default=None)
-    parser.add_argument("--chain-mode", choices=["token", "phrase", "cross-phrase", "hybrid"], default="token", help="Per-timestep input construction. hybrid = compressed phrase history + a recent 1-hot token tail, split at a random phrase boundary per story.")
+    parser.add_argument("--chain-mode", choices=["token", "phrase", "cross-phrase", "hybrid", "hybrid-cross"], default="token", help="Per-timestep input construction. hybrid = compressed phrase history + a recent 1-hot token tail, split at a random phrase boundary per story. hybrid-cross = hybrid whose history chains continue across clause boundaries while ascending.")
     parser.add_argument("--split-seed", type=int, default=0, help="Seed for the hybrid random split point (per-story split = split_seed*1000003 + story_id). Ignored for non-hybrid modes.")
     parser.add_argument("--index-map", default=None, help="Path to old_to_new.json from scripts.reorder_phrase_vocab; remaps record indices on the fly. Pass the matching reordered vocab via --vocab.")
     return parser.parse_args()

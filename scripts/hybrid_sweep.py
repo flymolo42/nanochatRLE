@@ -39,7 +39,7 @@ def _iter_story_raw_rows(records):
         yield current_key, current_rows
 
 
-def build_sweep_probes(records, min_history=1, max_probes=None, split=None):
+def build_sweep_probes(records, min_history=1, max_probes=None, split=None, index_map=None):
     # Clamp to >= 1: a position-0 probe has empty context (predict_probe_logits would
     # index last=-1, scoring the padding row). Never emit position-0 probes.
     from scripts.train_phrase_vectors import normalize_phrase_records
@@ -50,6 +50,8 @@ def build_sweep_probes(records, min_history=1, max_probes=None, split=None):
             continue
         stream = _canonical_token_stream(normalize_phrase_records(raw_rows))
         indices = [int(r["indices"][0]) for r in stream]
+        if index_map is not None:
+            indices = [int(index_map[index]) for index in indices]
         clauses = [int(r.get("phrase_id", 0)) for r in stream]
         for pos in range(len(indices)):
             if pos < min_history:
@@ -61,14 +63,14 @@ def build_sweep_probes(records, min_history=1, max_probes=None, split=None):
     return probes
 
 
-def context_steps_for_probe(probe, x, depth):
+def context_steps_for_probe(probe, x, depth, reset_on_clause=True):
     p = probe.target_pos
     tail_start = max(0, p - x)
     front_records = [
         {"indices": [probe.token_indices[i]], "phrase_id": probe.clause_ids[i]}
         for i in range(tail_start)
     ]
-    front_chains = _chains_from_token_records(front_records, reset_on_clause=True)
+    front_chains = _chains_from_token_records(front_records, reset_on_clause=reset_on_clause)
     if depth is not None:
         front_chains = front_chains[-depth:]
     tail = [[probe.token_indices[i]] for i in range(tail_start, p)]
@@ -164,15 +166,22 @@ def _aggregate(probes, logits, remap, bootstrap=0, bootstrap_seed=0):
     return out
 
 
+def _probe_contexts(probes, x, depth, remap, reset_on_clause=True):
+    return [
+        _remap_steps(context_steps_for_probe(p, x=x, depth=depth, reset_on_clause=reset_on_clause), remap)
+        for p in probes
+    ]
+
+
 def run_sweep(model, probes, x_values, d_values, fixed_x_for_depth, remap, batch_size, device,
-              bootstrap=0, bootstrap_seed=0):
-    result = {"x_sweep": {}, "d_sweep": {}, "num_probes": len(probes)}
+              bootstrap=0, bootstrap_seed=0, reset_on_clause=True):
+    result = {"x_sweep": {}, "d_sweep": {}, "num_probes": len(probes), "reset_on_clause": reset_on_clause}
     for x in x_values:
-        contexts = [_remap_steps(context_steps_for_probe(p, x=x, depth=None), remap) for p in probes]
+        contexts = _probe_contexts(probes, x=x, depth=None, remap=remap, reset_on_clause=reset_on_clause)
         logits = predict_probe_logits(model, contexts, batch_size, device)
         result["x_sweep"][str(x)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
     for d in d_values:
-        contexts = [_remap_steps(context_steps_for_probe(p, x=fixed_x_for_depth, depth=d), remap) for p in probes]
+        contexts = _probe_contexts(probes, x=fixed_x_for_depth, depth=d, remap=remap, reset_on_clause=reset_on_clause)
         logits = predict_probe_logits(model, contexts, batch_size, device)
         result["d_sweep"][str(d)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
     return result
