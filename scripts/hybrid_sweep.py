@@ -1,0 +1,162 @@
+"""
+Sweep eval logic for hybrid multihot context: next-token top-k accuracy + perplexity
+as a function of recent 1-hot tail length X and compressed depth D, on one shared
+probe set. This module is the library; scripts/eval_hybrid_context_sweep.py is the
+thin CLI wrapper.
+"""
+
+import math
+from dataclasses import dataclass
+
+import torch
+import torch.nn.functional as F
+
+from scripts.train_phrase_gpt import _canonical_token_stream, _chains_from_token_records
+
+
+@dataclass(frozen=True)
+class SweepProbe:
+    token_indices: list
+    clause_ids: list
+    target_pos: int
+    is_opener: bool
+
+
+def _iter_story_raw_rows(records):
+    """Group a stream of raw records into (split, story_id) -> rows, streaming.
+    Records in phrase_index.jsonl are contiguous by story, so consecutive grouping
+    is exact and never materializes the whole file."""
+    current_key = None
+    current_rows = []
+    for record in records:
+        key = (record["split"], int(record["story_id"]))
+        if current_key is not None and key != current_key:
+            yield current_key, current_rows
+            current_rows = []
+        current_key = key
+        current_rows.append(record)
+    if current_rows:
+        yield current_key, current_rows
+
+
+def build_sweep_probes(records, min_history=1, max_probes=None, split=None):
+    # Clamp to >= 1: a position-0 probe has empty context (predict_probe_logits would
+    # index last=-1, scoring the padding row). Never emit position-0 probes.
+    from scripts.train_phrase_vectors import normalize_phrase_records
+    min_history = max(1, min_history)
+    probes = []
+    for key, raw_rows in _iter_story_raw_rows(records):
+        if split is not None and key[0] != split:
+            continue
+        stream = _canonical_token_stream(normalize_phrase_records(raw_rows))
+        indices = [int(r["indices"][0]) for r in stream]
+        clauses = [int(r.get("phrase_id", 0)) for r in stream]
+        for pos in range(len(indices)):
+            if pos < min_history:
+                continue
+            is_opener = pos == 0 or clauses[pos] != clauses[pos - 1]
+            probes.append(SweepProbe(indices, clauses, pos, is_opener))
+            if max_probes is not None and len(probes) >= max_probes:
+                return probes
+    return probes
+
+
+def context_steps_for_probe(probe, x, depth):
+    p = probe.target_pos
+    tail_start = max(0, p - x)
+    front_records = [
+        {"indices": [probe.token_indices[i]], "phrase_id": probe.clause_ids[i]}
+        for i in range(tail_start)
+    ]
+    front_chains = _chains_from_token_records(front_records, reset_on_clause=True)
+    if depth is not None:
+        front_chains = front_chains[-depth:]
+    tail = [[probe.token_indices[i]] for i in range(tail_start, p)]
+    return front_chains + tail
+
+
+def topk_and_ce(logits_row, target, ks=(1, 5, 10)):
+    top = logits_row.topk(min(max(ks), logits_row.numel())).indices.tolist()
+    hits = {k: int(target in top[:k]) for k in ks}
+    ce = F.cross_entropy(logits_row.unsqueeze(0), torch.tensor([int(target)], device=logits_row.device)).item()
+    return hits, ce
+
+
+from scripts.train_phrase_gpt import PhraseSequenceExample, collate_phrase_sequences
+from scripts.eval_phrase_gpt_packed_vs_single import load_model_from_checkpoint, resolve_vocab_remap
+
+
+def _remap_steps(steps, remap):
+    if remap is None:
+        return steps
+    return [[int(remap[i]) for i in step] for step in steps]
+
+
+def predict_probe_logits(model, contexts, batch_size, device):
+    """contexts: list[list[list[int]]] (per probe: list of chains). Returns a tensor
+    [len(contexts), vocab] of the last-position logits, in input order. Memory-safe:
+    sort by length, small batches, free cache per batch."""
+    model.eval()
+    if not contexts:
+        return torch.empty((0, 0))
+    order = sorted(range(len(contexts)), key=lambda i: len(contexts[i]))
+    rows = [None] * len(contexts)
+    with torch.inference_mode():
+        for start in range(0, len(order), batch_size):
+            batch_idx = order[start:start + batch_size]
+            steps = [contexts[i] for i in batch_idx]
+            seq_len = max(2, max(len(s) for s in steps))
+            batch = collate_phrase_sequences(
+                [PhraseSequenceExample(input_indices=s, targets=[-1] * len(s)) for s in steps],
+                sequence_len=seq_len, dummy_token_id=0, device=device,
+            )
+            logits = model(batch.idx, phrase_indices=batch.phrase_indices,
+                           phrase_offsets=batch.phrase_offsets, phrase_batch_positions=batch.phrase_batch_positions)
+            last = torch.tensor([len(s) - 1 for s in steps], device=logits.device)
+            picked = logits[torch.arange(len(steps), device=logits.device), last, :].cpu()
+            for slot, row in zip(batch_idx, picked):
+                rows[slot] = row
+            del logits, batch
+            if device == "mps":
+                torch.mps.empty_cache()
+    return torch.stack(rows)
+
+
+def _aggregate(probes, logits, remap, bootstrap=0, bootstrap_seed=0):
+    buckets = {name: {"top1": 0, "top5": 0, "top10": 0, "ce": 0.0, "count": 0}
+               for name in ("all", "opener", "interior")}
+    for probe, row in zip(probes, logits):
+        target = int(remap[probe.token_indices[probe.target_pos]]) if remap is not None else probe.token_indices[probe.target_pos]
+        hits, ce = topk_and_ce(row, target, ks=(1, 5, 10))
+        for name in ("all", "opener" if probe.is_opener else "interior"):
+            b = buckets[name]
+            b["top1"] += hits[1]; b["top5"] += hits[5]; b["top10"] += hits[10]
+            b["ce"] += ce; b["count"] += 1
+    out = {}
+    for name, b in buckets.items():
+        n = max(b["count"], 1)
+        mean_ce = b["ce"] / n
+        out[name] = {
+            "top1": b["top1"] / n, "top5": b["top5"] / n, "top10": b["top10"] / n,
+            "mean_ce": mean_ce, "perplexity": math.exp(mean_ce) if b["count"] else float("nan"),
+            "count": b["count"],
+        }
+    return out
+
+
+def run_sweep(model, probes, x_values, d_values, fixed_x_for_depth, remap, batch_size, device,
+              bootstrap=0, bootstrap_seed=0):
+    result = {"x_sweep": {}, "d_sweep": {}, "num_probes": len(probes)}
+    for x in x_values:
+        contexts = [_remap_steps(context_steps_for_probe(p, x=x, depth=None), remap) for p in probes]
+        logits = predict_probe_logits(model, contexts, batch_size, device)
+        result["x_sweep"][str(x)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
+    for d in d_values:
+        contexts = [_remap_steps(context_steps_for_probe(p, x=fixed_x_for_depth, depth=d), remap) for p in probes]
+        logits = predict_probe_logits(model, contexts, batch_size, device)
+        result["d_sweep"][str(d)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
+    return result
+
+
+def _parse_int_list(text):
+    return [int(v) for v in text.split(",") if v.strip()]

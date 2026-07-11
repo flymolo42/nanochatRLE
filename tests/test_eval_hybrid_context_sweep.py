@@ -54,6 +54,25 @@ class HybridSweepPureTests(unittest.TestCase):
         self.assertTrue(all(idx in (6, 7) for p in probes for idx in p.token_indices))
         self.assertEqual([p.target_pos for p in probes], [1])
 
+    def test_build_sweep_probes_streams_filters_split_and_stops_early(self):
+        from scripts.hybrid_sweep import build_sweep_probes
+
+        def records():
+            for r in _story(0, [(0, [1, 2, 3])]):            # train (filtered out)
+                yield r
+            for r in _story(1, [(0, [4, 5, 6])]):            # validation — the wanted story
+                r = dict(r); r["split"] = "validation"
+                yield r
+            # one record of a later story so story 1's boundary is detectable,
+            # then a trap that a correct early-stopping builder never reaches
+            yield {"split": "train", "story_id": 2, "phrase_id": 0, "label": "punctuation",
+                   "record_type": "single", "indices": [7], "token_pos": 0, "start": 0, "end": 1}
+            raise AssertionError("build_sweep_probes read past the story it needed")
+
+        probes = build_sweep_probes(records(), min_history=1, max_probes=1, split="validation")
+        self.assertEqual(len(probes), 1)
+        self.assertEqual(probes[0].token_indices, [4, 5, 6])
+
     def test_context_steps_x_controls_recent_one_hot_tail(self):
         # A monotone single clause is where X visibly matters: X=0 merges the whole
         # history into one chain; X=2 leaves the last two tokens 1-hot.
