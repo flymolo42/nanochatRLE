@@ -624,17 +624,19 @@ def parse_args():
 def _run_training_sweep(model, probes, args, remap, device, epoch, shard, trajectory):
     from scripts.hybrid_sweep import run_sweep, _parse_int_list  # lazy: avoids import cycle
     was_training = model.training
-    result = run_sweep(
-        model, probes,
-        x_values=_parse_int_list(args.sweep_x_values),
-        d_values=_parse_int_list(args.sweep_d_values) + [None],
-        fixed_x_for_depth=0, remap=remap,
-        batch_size=args.sweep_batch_size, device=device,
-        bootstrap=args.sweep_bootstrap, bootstrap_seed=args.sweep_seed,
-    )
-    result["split"] = args.sweep_eval_split
-    model.train(was_training)
-    trajectory.append({"epoch": epoch, "shard": shard, "sweep": result})
+    try:
+        result = run_sweep(
+            model, probes,
+            x_values=_parse_int_list(args.sweep_x_values),
+            d_values=_parse_int_list(args.sweep_d_values) + [None],
+            fixed_x_for_depth=0, remap=remap,
+            batch_size=args.sweep_batch_size, device=device,
+            bootstrap=args.sweep_bootstrap, bootstrap_seed=args.sweep_seed,
+        )
+        result["split"] = args.sweep_eval_split
+        trajectory.append({"epoch": epoch, "shard": shard, "sweep": result})
+    finally:
+        model.train(was_training)
     return result
 
 
@@ -759,6 +761,8 @@ def main():
         sweep_probes = build_sweep_probes(iter_records(args.sweep_eval_records),
                                           min_history=1, max_probes=args.sweep_max_probes,
                                           split=args.sweep_eval_split)
+        if not sweep_probes:
+            raise SystemExit("--sweep-eval-records produced 0 probes (check --sweep-eval-split / path)")
         print(f"sweep eval: {len(sweep_probes)} probes from {args.sweep_eval_records} (split={args.sweep_eval_split})", flush=True)
 
     for epoch in range(start_epoch, args.epochs + 1):

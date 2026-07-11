@@ -710,6 +710,51 @@ class PhraseGPTTests(unittest.TestCase):
         counts = {e["sweep"]["num_probes"] for e in traj}
         self.assertEqual(len(counts), 1)  # same probe set every epoch
 
+    def test_main_raises_when_sweep_eval_produces_zero_probes(self):
+        from scripts.train_phrase_gpt import main
+
+        _force_sdpa()
+        train = [
+            PhraseSequenceExample(input_indices=[[0], [1], [2]], targets=[1, 2, 3]),
+            PhraseSequenceExample(input_indices=[[3], [4], [5]], targets=[4, 5, 1]),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            vocab, manifest = _write_shard_fixture(tmp, [train])
+            sweep_records = tmp / "val_records.jsonl"
+            rows = [
+                {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [1], "token_pos": 0},
+                {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [2], "token_pos": 1},
+                {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [3], "token_pos": 2},
+            ]
+            sweep_records.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            out_dir = str(tmp / "out")
+            extra = ["--epochs", "2", "--sweep-eval-records", str(sweep_records),
+                     "--sweep-eval-split", "validation", "--sweep-x-values", "0",
+                     "--sweep-d-values", "1", "--sweep-max-probes", "5", "--sweep-bootstrap", "0"]
+            with mock.patch("sys.argv", _main_argv(vocab, manifest, out_dir, extra=extra)):
+                with self.assertRaises(SystemExit):
+                    main()
+
+    def test_main_without_sweep_flags_leaves_trajectory_empty(self):
+        from scripts.train_phrase_gpt import main
+
+        _force_sdpa()
+        train = [
+            PhraseSequenceExample(input_indices=[[0], [1], [2]], targets=[1, 2, 3]),
+            PhraseSequenceExample(input_indices=[[3], [4], [5]], targets=[4, 5, 1]),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            vocab, manifest = _write_shard_fixture(tmp, [train])
+            out_dir = str(tmp / "out")
+            extra = ["--epochs", "2"]
+            with mock.patch("sys.argv", _main_argv(vocab, manifest, out_dir, extra=extra)):
+                main()
+            metrics = json.loads((Path(out_dir) / "metrics.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metrics["sweep_trajectory"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

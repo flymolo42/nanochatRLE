@@ -83,7 +83,6 @@ def topk_and_ce(logits_row, target, ks=(1, 5, 10)):
 
 
 from scripts.train_phrase_gpt import PhraseSequenceExample, collate_phrase_sequences
-from scripts.eval_phrase_gpt_packed_vs_single import load_model_from_checkpoint, resolve_vocab_remap
 
 
 def _remap_steps(steps, remap):
