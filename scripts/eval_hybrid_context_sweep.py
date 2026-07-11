@@ -31,9 +31,15 @@ def _stories(records):
     return grouped
 
 
-def build_sweep_probes(records, min_history=1, max_probes=None):
+def build_sweep_probes(records, min_history=1, max_probes=None, split=None):
+    # Clamp to at least 1: a probe at position 0 has an empty context, which
+    # predict_probe_logits would index at last=-1 (silently scoring the padding
+    # row and polluting every bucket). Position-0 probes must never be emitted.
+    min_history = max(1, min_history)
     probes = []
-    for _key, rows in sorted(_stories(records).items()):
+    for key, rows in sorted(_stories(records).items()):
+        if split is not None and key[0] != split:
+            continue
         stream = _canonical_token_stream(rows)
         indices = [int(r["indices"][0]) for r in stream]
         clauses = [int(r.get("phrase_id", 0)) for r in stream]
@@ -158,6 +164,10 @@ def parse_args():
     parser.add_argument("--fixed-x-for-depth", type=int, default=0)
     parser.add_argument("--min-history", type=int, default=1)
     parser.add_argument("--max-probes", type=int, default=20000)
+    parser.add_argument("--split", default=None,
+                         help="Only score stories from this split (e.g. 'validation'). "
+                              "Default: all splits in --records (pass a held-out-only file, "
+                              "or set this, to avoid scoring on training data).")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default="")
     return parser.parse_args()
@@ -167,7 +177,8 @@ def main():
     args = parse_args()
     device = choose_device(args.device)
     records = list(iter_records(args.records))
-    probes = build_sweep_probes(records, min_history=args.min_history, max_probes=args.max_probes)
+    probes = build_sweep_probes(records, min_history=args.min_history, max_probes=args.max_probes,
+                                 split=args.split)
     if not probes:
         raise SystemExit("No probes found.")
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
@@ -176,9 +187,14 @@ def main():
     if remap is not None:
         remap = remap.to("cpu")
     print(f"probes={len(probes)} device={device} remap={'yes' if remap is not None else 'no'}", flush=True)
+    # Note: compressed contexts longer than the model's sequence_len are truncated
+    # by the final-layer attention window, so very large D and unbounded D (None)
+    # can look identical on long stories — the D-sweep is only meaningful up to
+    # ~sequence_len chains of history.
     d_values = _parse_int_list(args.d_values) + [None]
     result = run_sweep(model, probes, x_values=_parse_int_list(args.x_values), d_values=d_values,
                        fixed_x_for_depth=args.fixed_x_for_depth, remap=remap, batch_size=args.batch_size, device=device)
+    result["split"] = args.split
     print(json.dumps(result, indent=2))
 
 

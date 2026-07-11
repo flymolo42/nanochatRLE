@@ -35,6 +35,25 @@ class HybridSweepPureTests(unittest.TestCase):
         interior = next(p for p in probes if p.target_pos == 2)
         self.assertFalse(interior.is_opener)
 
+    def test_build_sweep_probes_clamps_min_history_to_avoid_empty_context(self):
+        # min_history=0 would otherwise emit a probe at position 0 with no history
+        # (an empty context), which silently scores the padding row. min_history
+        # should be clamped to at least 1, so this must match min_history=1.
+        records = _story(0, [(0, [1, 3, 2]), (1, [4, 5])])
+        probes_zero = build_sweep_probes(records, min_history=0)
+        probes_one = build_sweep_probes(records, min_history=1)
+        self.assertEqual([p.target_pos for p in probes_zero], [p.target_pos for p in probes_one])
+        self.assertNotIn(0, [p.target_pos for p in probes_zero])
+
+    def test_build_sweep_probes_split_filter(self):
+        train_records = _story(0, [(0, [1, 3, 2]), (1, [4, 5])])
+        val_records = [dict(r, split="validation") for r in _story(1, [(0, [6, 7])])]
+        records = train_records + val_records
+        probes = build_sweep_probes(records, min_history=1, split="validation")
+        self.assertTrue(len(probes) > 0)
+        self.assertTrue(all(idx in (6, 7) for p in probes for idx in p.token_indices))
+        self.assertEqual([p.target_pos for p in probes], [1])
+
     def test_context_steps_x_controls_recent_one_hot_tail(self):
         # A monotone single clause is where X visibly matters: X=0 merges the whole
         # history into one chain; X=2 leaves the last two tokens 1-hot.
