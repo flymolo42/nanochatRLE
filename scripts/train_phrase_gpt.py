@@ -608,7 +608,34 @@ def parse_args():
     parser.add_argument("--load-progress-every", type=int, default=100000, help="Print record-loading progress every N stories. Use 0 to disable intermediate progress.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="")
+    parser.add_argument("--sweep-eval-records", default=None, help="Held-out records for in-training sweep eval (enables it).")
+    parser.add_argument("--sweep-eval-split", default=None, help="Restrict sweep probes to this split, e.g. 'validation'.")
+    parser.add_argument("--sweep-eval-every-epochs", type=int, default=1)
+    parser.add_argument("--sweep-eval-every-shards", type=int, default=0)
+    parser.add_argument("--sweep-x-values", default="0,1,2,4,8,16")
+    parser.add_argument("--sweep-d-values", default="1,2,4,8,16,32")
+    parser.add_argument("--sweep-max-probes", type=int, default=2000)
+    parser.add_argument("--sweep-batch-size", type=int, default=32)
+    parser.add_argument("--sweep-bootstrap", type=int, default=1000)
+    parser.add_argument("--sweep-seed", type=int, default=0)
     return parser.parse_args()
+
+
+def _run_training_sweep(model, probes, args, remap, device, epoch, shard, trajectory):
+    from scripts.hybrid_sweep import run_sweep, _parse_int_list  # lazy: avoids import cycle
+    was_training = model.training
+    result = run_sweep(
+        model, probes,
+        x_values=_parse_int_list(args.sweep_x_values),
+        d_values=_parse_int_list(args.sweep_d_values) + [None],
+        fixed_x_for_depth=0, remap=remap,
+        batch_size=args.sweep_batch_size, device=device,
+        bootstrap=args.sweep_bootstrap, bootstrap_seed=args.sweep_seed,
+    )
+    result["split"] = args.sweep_eval_split
+    model.train(was_training)
+    trajectory.append({"epoch": epoch, "shard": shard, "sweep": result})
+    return result
 
 
 def main():
@@ -682,6 +709,7 @@ def main():
         "best_val_loss": None,
         "stop_reason": None,
         "epochs": [],
+        "sweep_trajectory": [],
     }
     early_stopping = EarlyStoppingConfig(
         patience=args.patience,
@@ -705,6 +733,7 @@ def main():
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         saved_metrics = checkpoint.get("metrics", {})
         metrics["epochs"] = list(saved_metrics.get("epochs", []))
+        metrics["sweep_trajectory"] = list(saved_metrics.get("sweep_trajectory", []))
         metrics["best_epoch"] = saved_metrics.get("best_epoch")
         metrics["best_val_loss"] = saved_metrics.get("best_val_loss")
         early_state.best_epoch = metrics["best_epoch"]
@@ -724,17 +753,27 @@ def main():
         if start_epoch > args.epochs:
             print(f"checkpoint already has {start_epoch - 1} completed epochs; nothing to do for --epochs {args.epochs}.", flush=True)
 
+    sweep_probes = None
+    if args.sweep_eval_records:
+        from scripts.hybrid_sweep import build_sweep_probes  # lazy: avoids import cycle
+        sweep_probes = build_sweep_probes(iter_records(args.sweep_eval_records),
+                                          min_history=1, max_probes=args.sweep_max_probes,
+                                          split=args.sweep_eval_split)
+        print(f"sweep eval: {len(sweep_probes)} probes from {args.sweep_eval_records} (split={args.sweep_eval_split})", flush=True)
+
     for epoch in range(start_epoch, args.epochs + 1):
         epoch_start_shard = start_shard if epoch == start_epoch else 0
         epoch_prior_rows = prior_rows if epoch == start_epoch else None
 
-        def save_rolling_checkpoint(shard_idx, rows, epoch=epoch):
+        def on_shard_end(shard_idx, rows, epoch=epoch):
             if args.checkpoint_every_shards > 0 and shard_idx % args.checkpoint_every_shards == 0:
                 save_checkpoint(args.out_dir, model, checkpoint_config, metrics, optimizer=optimizer, extra={
                     "epoch": epoch - 1,
                     "epochs_without_improvement": early_state.epochs_without_improvement,
                     "shard_progress": {"epoch": epoch, "shards_completed": shard_idx, "metric_rows": rows},
                 })
+            if sweep_probes is not None and args.sweep_eval_every_shards > 0 and shard_idx % args.sweep_eval_every_shards == 0:
+                _run_training_sweep(model, sweep_probes, args, vocab_remap, device, epoch, shard_idx, metrics["sweep_trajectory"])
 
         if manifest is None:
             train_metrics = run_epoch(
@@ -777,7 +816,7 @@ def main():
                 remap=vocab_remap,
                 start_shard=epoch_start_shard,
                 prior_rows=epoch_prior_rows,
-                on_shard_end=save_rolling_checkpoint,
+                on_shard_end=on_shard_end,
             )
             val_metrics = run_epoch_on_shards(
                 model,
@@ -795,6 +834,8 @@ def main():
             ) if val_example_count else {"loss": None, "accuracy": None, "tokens": 0}
         row = {"epoch": epoch, "train": train_metrics, "val": val_metrics}
         metrics["epochs"].append(row)
+        if sweep_probes is not None and epoch % max(1, args.sweep_eval_every_epochs) == 0:
+            _run_training_sweep(model, sweep_probes, args, vocab_remap, device, epoch, None, metrics["sweep_trajectory"])
         if val_example_count:
             early_state.update(val_metrics, epoch=epoch, config=early_stopping)
             metrics["best_epoch"] = early_state.best_epoch

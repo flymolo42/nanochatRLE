@@ -652,6 +652,64 @@ class PhraseGPTTests(unittest.TestCase):
         self.assertTrue(state.should_stop)
         self.assertEqual(state.stop_reason, "target validation accuracy reached")
 
+    def test_run_training_sweep_appends_entry_and_restores_train_mode(self):
+        from scripts.train_phrase_gpt import _run_training_sweep
+        from scripts.hybrid_sweep import build_sweep_probes
+        import argparse
+
+        _force_sdpa()
+        model = _tiny_phrase_gpt()
+        model.train(True)
+        records = [
+            {"split": "validation", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [1], "token_pos": 0},
+            {"split": "validation", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [2], "token_pos": 1},
+            {"split": "validation", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [3], "token_pos": 2},
+        ]
+        probes = build_sweep_probes(records, min_history=1, split="validation")
+        args = argparse.Namespace(sweep_x_values="0", sweep_d_values="1", sweep_batch_size=4,
+                                  sweep_bootstrap=0, sweep_seed=0, sweep_eval_split="validation")
+        trajectory = []
+        _run_training_sweep(model, probes, args, None, "cpu", epoch=3, shard=None, trajectory=trajectory)
+
+        self.assertEqual(len(trajectory), 1)
+        self.assertEqual(trajectory[0]["epoch"], 3)
+        self.assertIsNone(trajectory[0]["shard"])
+        self.assertIn("x_sweep", trajectory[0]["sweep"])
+        self.assertTrue(model.training)  # restored
+
+    def test_main_records_sweep_trajectory_per_epoch(self):
+        from scripts.train_phrase_gpt import main
+
+        _force_sdpa()
+        train = [
+            PhraseSequenceExample(input_indices=[[0], [1], [2]], targets=[1, 2, 3]),
+            PhraseSequenceExample(input_indices=[[3], [4], [5]], targets=[4, 5, 1]),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            vocab, manifest = _write_shard_fixture(tmp, [train])
+            sweep_records = tmp / "val_records.jsonl"
+            rows = [
+                {"split": "validation", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [1], "token_pos": 0},
+                {"split": "validation", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [2], "token_pos": 1},
+                {"split": "validation", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [3], "token_pos": 2},
+            ]
+            sweep_records.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            out_dir = str(tmp / "out")
+            extra = ["--epochs", "2", "--sweep-eval-records", str(sweep_records),
+                     "--sweep-eval-split", "validation", "--sweep-x-values", "0",
+                     "--sweep-d-values", "1", "--sweep-max-probes", "5", "--sweep-bootstrap", "0"]
+            with mock.patch("sys.argv", _main_argv(vocab, manifest, out_dir, extra=extra)):
+                main()
+            metrics = json.loads((Path(out_dir) / "metrics.json").read_text(encoding="utf-8"))
+
+        traj = metrics["sweep_trajectory"]
+        self.assertEqual([e["epoch"] for e in traj], [1, 2])
+        self.assertTrue(all(e["shard"] is None for e in traj))
+        self.assertTrue(all("x_sweep" in e["sweep"] for e in traj))
+        counts = {e["sweep"]["num_probes"] for e in traj}
+        self.assertEqual(len(counts), 1)  # same probe set every epoch
+
 
 if __name__ == "__main__":
     unittest.main()
