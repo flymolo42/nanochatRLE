@@ -263,6 +263,53 @@ class PhraseGPTTests(unittest.TestCase):
         )
         self.assertEqual([(e.input_indices, e.targets) for e in via_dispatch], [([[10], [11]], [11, 12])])
 
+    def _chain_story_records(self):
+        return [
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [1], "token_pos": 0},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [3], "token_pos": 1},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [2], "token_pos": 2},
+            {"split": "train", "story_id": 0, "phrase_id": 1, "label": "punctuation", "start": 3, "end": 5, "record_type": "single", "indices": [4], "token_pos": 0},
+            {"split": "train", "story_id": 0, "phrase_id": 1, "label": "punctuation", "start": 3, "end": 5, "record_type": "single", "indices": [5], "token_pos": 1},
+        ]
+
+    def test_phrase_mode_breaks_on_order_and_clause_boundary(self):
+        from scripts.train_phrase_gpt import examples_from_story_records
+
+        examples = examples_from_story_records(self._chain_story_records(), sequence_len=10, chain_mode="phrase")
+
+        # clause 0 -> [1,3] then break on out-of-order 2 -> [2]; clause boundary breaks before [4,5]
+        # chains: [1,3], [2], [4,5]; steps target = next chain's first token
+        self.assertEqual(
+            [(e.input_indices, e.targets) for e in examples],
+            [([[1, 3], [2]], [2, 4])],
+        )
+
+    def test_phrase_mode_monotone_clause_is_single_chain(self):
+        from scripts.train_phrase_gpt import examples_from_story_records
+
+        records = [
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [10], "token_pos": 0},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [11], "token_pos": 1},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [12], "token_pos": 2},
+            {"split": "train", "story_id": 0, "phrase_id": 1, "label": "punctuation", "start": 3, "end": 5, "record_type": "single", "indices": [20], "token_pos": 0},
+            {"split": "train", "story_id": 0, "phrase_id": 1, "label": "punctuation", "start": 3, "end": 5, "record_type": "single", "indices": [21], "token_pos": 1},
+        ]
+
+        examples = examples_from_story_records(records, sequence_len=10, chain_mode="phrase")
+
+        # monotone clause 0 -> single chain [10,11,12]; target = first token of clause-1 chain
+        self.assertEqual([(e.input_indices, e.targets) for e in examples], [([[10, 11, 12]], [20])])
+
+    def test_phrase_mode_respects_sequence_len_chunking(self):
+        from scripts.train_phrase_gpt import examples_from_story_records
+
+        examples = examples_from_story_records(self._chain_story_records(), sequence_len=1, chain_mode="phrase")
+
+        self.assertEqual(
+            [(e.input_indices, e.targets) for e in examples],
+            [([[1, 3]], [2]), ([[2]], [4])],
+        )
+
     def test_early_stopping_tracks_best_validation_loss_and_patience(self):
         config = EarlyStoppingConfig(patience=1, min_delta=0.01)
         state = EarlyStoppingState()

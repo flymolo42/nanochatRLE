@@ -132,6 +132,26 @@ def _token_steps(records):
     ]
 
 
+def _chain_steps(records, reset_on_clause):
+    token_records = _canonical_token_stream(records)
+    chains = []
+    current = []
+    current_clause = None
+    for record in token_records:
+        if not record.get("indices"):
+            continue
+        index = int(record["indices"][0])
+        clause = int(record.get("phrase_id", 0))
+        if current and (index <= current[-1] or (reset_on_clause and clause != current_clause)):
+            chains.append(current)
+            current = []
+        current.append(index)
+        current_clause = clause
+    if current:
+        chains.append(current)
+    return [(chains[position], chains[position + 1][0]) for position in range(len(chains) - 1)]
+
+
 def _chunk_steps_into_examples(steps, sequence_len):
     examples = []
     for start in range(0, len(steps), sequence_len):
@@ -146,6 +166,7 @@ def _chunk_steps_into_examples(steps, sequence_len):
 
 CHAIN_MODE_BUILDERS = {
     "token": lambda records: _token_steps(records),
+    "phrase": lambda records: _chain_steps(records, reset_on_clause=True),
 }
 
 
