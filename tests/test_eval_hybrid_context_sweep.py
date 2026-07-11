@@ -63,6 +63,39 @@ class HybridSweepPureTests(unittest.TestCase):
         expected_ce = -math.log(torch.softmax(logits, dim=0)[1].item())
         self.assertAlmostEqual(ce, expected_ce, places=5)
 
+    def test_run_sweep_scores_same_probes_across_configs(self):
+        import torch
+        from nanochat.gpt import GPT, GPTConfig
+        import nanochat.flash_attention as fa_module
+        from scripts.eval_hybrid_context_sweep import build_sweep_probes, run_sweep
+
+        fa_module._override_impl = "sdpa"
+        fa_module.USE_FA3 = fa_module._resolve_use_fa3()
+        torch.manual_seed(0)
+        config = GPTConfig(sequence_len=8, vocab_size=8, n_layer=1, n_head=2, n_kv_head=2,
+                           n_embd=32, window_pattern="L", phrase_vocab_size=8)
+        model = GPT(config, pad_vocab_size_to=1)
+        model.init_weights()
+
+        records = _story(0, [(0, [1, 3, 2]), (1, [4, 5])]) + _story(1, [(0, [1, 2]), (1, [3, 4, 5])])
+        probes = build_sweep_probes(records, min_history=1)
+
+        result = run_sweep(model, probes, x_values=[0, 2], d_values=[1, None],
+                           fixed_x_for_depth=0, remap=None, batch_size=4, device="cpu")
+
+        # comparability: every X config scored the SAME number of probes
+        x0 = result["x_sweep"]["0"]["all"]["count"]
+        x2 = result["x_sweep"]["2"]["all"]["count"]
+        self.assertEqual(x0, x2)
+        self.assertEqual(x0, len(probes))
+        # metric keys present
+        for key in ("top1", "top5", "top10", "mean_ce", "perplexity", "count"):
+            self.assertIn(key, result["x_sweep"]["0"]["all"])
+        # opener/interior buckets present and sum to all
+        opener = result["x_sweep"]["0"]["opener"]["count"]
+        interior = result["x_sweep"]["0"]["interior"]["count"]
+        self.assertEqual(opener + interior, x0)
+
 
 if __name__ == "__main__":
     unittest.main()
