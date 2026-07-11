@@ -25,10 +25,10 @@ from scripts.train_phrase_gpt import (
 from scripts.train_phrase_vectors import _legacy_record_to_typed_records, iter_records, load_vocab
 
 
-def _flush_story(current_rows, sequence_len, chain_mode):
+def _flush_story(current_rows, sequence_len, chain_mode, split_seed):
     if not current_rows:
         return []
-    return examples_from_story_records(current_rows, sequence_len=sequence_len, chain_mode=chain_mode)
+    return examples_from_story_records(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, seed=split_seed)
 
 
 def _write_shard(out_dir, shard_index, examples, sequence_len, split):
@@ -47,7 +47,7 @@ def _write_shard(out_dir, shard_index, examples, sequence_len, split):
     }
 
 
-def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token"):
+def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token", split_seed=0):
     os.makedirs(out_dir, exist_ok=True)
     started_at = time.time()
     current_key = None
@@ -82,7 +82,7 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
             key = (record["split"], int(record["story_id"]))
             if current_key is not None and key != current_key:
                 stories_seen += 1
-                if not add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode)):
+                if not add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed)):
                     current_rows = []
                     break
                 if progress_every > 0 and stories_seen % progress_every == 0:
@@ -95,7 +95,7 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
 
     if current_rows and (max_examples is None or examples_seen < max_examples):
         stories_seen += 1
-        add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode))
+        add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed))
 
     for split, pending_examples in list(pending_examples_by_split.items()):
         if pending_examples:
@@ -109,6 +109,7 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
         "vocab": vocab_path,
         "sequence_len": sequence_len,
         "chain_mode": chain_mode,
+        "split_seed": split_seed,
         "examples_per_shard": examples_per_shard,
         "num_shards": len(shards),
         "num_examples": sum(shard["num_examples"] for shard in shards),
@@ -141,7 +142,8 @@ def parse_args():
     parser.add_argument("--examples-per-shard", type=int, default=50000)
     parser.add_argument("--progress-every", type=int, default=100000)
     parser.add_argument("--limit-examples", type=int, default=None)
-    parser.add_argument("--chain-mode", choices=["token", "phrase", "cross-phrase"], default="token", help="How to build per-timestep inputs: token (one token/step, default), phrase (one multihot chain per punctuation clause, breaking on out-of-order vocab index), cross-phrase (chains span clause boundaries, breaking only on out-of-order index).")
+    parser.add_argument("--chain-mode", choices=["token", "phrase", "cross-phrase", "hybrid"], default="token", help="Per-timestep input construction. hybrid = compressed phrase history + a recent 1-hot token tail, split at a random phrase boundary per story.")
+    parser.add_argument("--split-seed", type=int, default=0, help="Seed for the hybrid random split point (per-story split = split_seed*1000003 + story_id). Ignored for non-hybrid modes.")
     return parser.parse_args()
 
 
@@ -159,6 +161,7 @@ def main():
         progress_every=args.progress_every,
         max_examples=args.limit_examples,
         chain_mode=args.chain_mode,
+        split_seed=args.split_seed,
     )
     print(json.dumps(manifest, indent=2))
 

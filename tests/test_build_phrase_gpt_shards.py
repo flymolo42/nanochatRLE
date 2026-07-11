@@ -67,6 +67,33 @@ class BuildPhraseGPTShardsTests(unittest.TestCase):
         example = tensor_shard_to_examples(shard)[0]
         self.assertEqual((example.input_indices, example.targets), ([[1, 3], [2]], [2, 4]))
 
+    def test_build_shards_hybrid_mode_records_mode_and_seed(self):
+        records = [
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [1], "token_pos": 0},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [3], "token_pos": 1},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [2], "token_pos": 2},
+            {"split": "train", "story_id": 0, "phrase_id": 1, "label": "punctuation", "start": 3, "end": 5, "record_type": "single", "indices": [4], "token_pos": 0},
+            {"split": "train", "story_id": 0, "phrase_id": 1, "label": "punctuation", "start": 3, "end": 5, "record_type": "single", "indices": [5], "token_pos": 1},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = build_shards_from_records(
+                records=iter(records), out_dir=tmpdir, sequence_len=10,
+                examples_per_shard=50, chain_mode="hybrid", split_seed=123,
+            )
+            saved = json.loads((Path(tmpdir) / "manifest.json").read_text(encoding="utf-8"))
+            shard = torch.load(Path(tmpdir) / saved["shards"][0]["file"], map_location="cpu", weights_only=False)
+
+        self.assertEqual(saved["chain_mode"], "hybrid")
+        self.assertEqual(saved["split_seed"], 123)
+        # deterministic given the seed: matches examples_from_story_records at seed=123
+        from scripts.train_phrase_gpt import examples_from_story_records, tensor_shard_to_examples
+        expected = examples_from_story_records(records, sequence_len=10, chain_mode="hybrid", seed=123)
+        got = tensor_shard_to_examples(shard)
+        self.assertEqual(
+            [(e.input_indices, e.targets) for e in got],
+            [(e.input_indices, e.targets) for e in expected],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
