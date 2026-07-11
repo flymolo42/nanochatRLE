@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from scripts.build_phrase_gpt_shards import build_shards_from_records
+from scripts.build_phrase_gpt_shards import build_shards_from_records, remap_record_indices
 from scripts.train_phrase_gpt import tensor_shard_to_examples
 
 
@@ -93,6 +93,37 @@ class BuildPhraseGPTShardsTests(unittest.TestCase):
             [(e.input_indices, e.targets) for e in got],
             [(e.input_indices, e.targets) for e in expected],
         )
+
+
+class IndexMapTests(unittest.TestCase):
+    def test_remap_record_indices_maps_and_sorts_multitoken_lists(self):
+        record = {"record_type": "packed", "indices": [3, 5], "split": "train", "story_id": 0, "phrase_id": 0}
+        mapped = remap_record_indices(record, [0, 1, 2, 9, 4, 2])
+        self.assertEqual(mapped["indices"], [2, 9])
+        self.assertEqual(record["indices"], [3, 5])
+
+    def test_build_shards_applies_index_map(self):
+        records = [
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [10], "token_pos": 0},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [11], "token_pos": 1},
+            {"split": "train", "story_id": 0, "phrase_id": 0, "label": "punctuation", "start": 0, "end": 3, "record_type": "single", "indices": [12], "token_pos": 2},
+        ]
+        index_map = list(range(13))
+        index_map[10], index_map[11], index_map[12] = 0, 5, 3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = build_shards_from_records(
+                records=iter(records),
+                out_dir=tmpdir,
+                sequence_len=4,
+                examples_per_shard=10,
+                index_map=index_map,
+            )
+            shard = torch.load(Path(tmpdir) / manifest["shards"][0]["file"], map_location="cpu", weights_only=False)
+
+        example = tensor_shard_to_examples(shard)[0]
+        self.assertEqual(example.input_indices, [[0], [5]])
+        self.assertEqual(example.targets, [5, 3])
 
 
 if __name__ == "__main__":

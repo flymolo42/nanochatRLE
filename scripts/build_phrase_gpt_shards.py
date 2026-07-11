@@ -25,6 +25,17 @@ from scripts.train_phrase_gpt import (
 from scripts.train_phrase_vectors import _legacy_record_to_typed_records, iter_records, load_vocab
 
 
+def remap_record_indices(record, index_map):
+    """Return a copy of record with vocab indices remapped; multi-token index
+    lists are re-sorted because a remap can break their ascending order."""
+    remapped = dict(record)
+    indices = [int(index_map[int(index)]) for index in record.get("indices", [])]
+    if len(indices) > 1:
+        indices.sort()
+    remapped["indices"] = indices
+    return remapped
+
+
 def _flush_story(current_rows, sequence_len, chain_mode, split_seed):
     if not current_rows:
         return []
@@ -47,7 +58,7 @@ def _write_shard(out_dir, shard_index, examples, sequence_len, split):
     }
 
 
-def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token", split_seed=0):
+def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token", split_seed=0, index_map=None):
     os.makedirs(out_dir, exist_ok=True)
     started_at = time.time()
     current_key = None
@@ -78,6 +89,8 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
     for raw_record in records:
         typed_records = [raw_record] if "record_type" in raw_record else _legacy_record_to_typed_records(raw_record)
         records_seen += 1
+        if index_map is not None:
+            typed_records = [remap_record_indices(record, index_map) for record in typed_records]
         for record in typed_records:
             key = (record["split"], int(record["story_id"]))
             if current_key is not None and key != current_key:
@@ -144,6 +157,7 @@ def parse_args():
     parser.add_argument("--limit-examples", type=int, default=None)
     parser.add_argument("--chain-mode", choices=["token", "phrase", "cross-phrase", "hybrid"], default="token", help="Per-timestep input construction. hybrid = compressed phrase history + a recent 1-hot token tail, split at a random phrase boundary per story.")
     parser.add_argument("--split-seed", type=int, default=0, help="Seed for the hybrid random split point (per-story split = split_seed*1000003 + story_id). Ignored for non-hybrid modes.")
+    parser.add_argument("--index-map", default=None, help="Path to old_to_new.json from scripts.reorder_phrase_vocab; remaps record indices on the fly. Pass the matching reordered vocab via --vocab.")
     return parser.parse_args()
 
 
@@ -151,6 +165,12 @@ def main():
     args = parse_args()
     vocab = load_vocab(args.vocab)
     print(f"loaded vocab size {vocab.size}", flush=True)
+    index_map = None
+    if args.index_map:
+        with open(args.index_map, "r", encoding="utf-8") as file:
+            index_map = json.load(file)
+        if len(index_map) != vocab.size:
+            raise ValueError(f"index map size {len(index_map)} does not match vocab size {vocab.size}")
     manifest = build_shards_from_records(
         records=iter_records(args.records),
         out_dir=args.out_dir,
@@ -162,6 +182,7 @@ def main():
         max_examples=args.limit_examples,
         chain_mode=args.chain_mode,
         split_seed=args.split_seed,
+        index_map=index_map,
     )
     print(json.dumps(manifest, indent=2))
 
