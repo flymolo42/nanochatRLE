@@ -167,6 +167,7 @@ def _chunk_steps_into_examples(steps, sequence_len):
 CHAIN_MODE_BUILDERS = {
     "token": lambda records: _token_steps(records),
     "phrase": lambda records: _chain_steps(records, reset_on_clause=True),
+    "cross-phrase": lambda records: _chain_steps(records, reset_on_clause=False),
 }
 
 

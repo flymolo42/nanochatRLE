@@ -310,6 +310,18 @@ class PhraseGPTTests(unittest.TestCase):
             [([[1, 3]], [2]), ([[2]], [4])],
         )
 
+    def test_cross_phrase_mode_merges_in_order_run_across_clauses(self):
+        from scripts.train_phrase_gpt import examples_from_story_records
+
+        examples = examples_from_story_records(self._chain_story_records(), sequence_len=10, chain_mode="cross-phrase")
+
+        # stream 1,3,2,4,5: break only on out-of-order (2<=3) -> chains [1,3] and [2,4,5]
+        # (2->4->5 merges across the clause boundary because there is no clause reset)
+        self.assertEqual(
+            [(e.input_indices, e.targets) for e in examples],
+            [([[1, 3]], [2])],
+        )
+
     def test_early_stopping_tracks_best_validation_loss_and_patience(self):
         config = EarlyStoppingConfig(patience=1, min_delta=0.01)
         state = EarlyStoppingState()
