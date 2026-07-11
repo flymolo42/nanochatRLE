@@ -322,6 +322,44 @@ class PhraseGPTTests(unittest.TestCase):
             [([[1, 3]], [2])],
         )
 
+    def test_phrase_boundary_positions_marks_clause_starts_and_ends(self):
+        from scripts.train_phrase_gpt import _canonical_token_stream, _phrase_boundary_positions
+        stream = _canonical_token_stream(self._chain_story_records())
+        self.assertEqual(_phrase_boundary_positions(stream), [0, 3, 5])
+
+    def test_hybrid_steps_at_split_endpoints_and_middle(self):
+        from scripts.train_phrase_gpt import _canonical_token_stream, _hybrid_steps_at_split
+        stream = _canonical_token_stream(self._chain_story_records())  # indices 1,3,2,4,5; clauses 0,0,0,1,1
+
+        # split=N (5): fully compressed == phrase mode
+        self.assertEqual(_hybrid_steps_at_split(stream, 5), [([1, 3], 2), ([2], 4)])
+        # split=0: fully 1-hot, every token predicts the next
+        self.assertEqual(_hybrid_steps_at_split(stream, 0), [([1], 3), ([3], 2), ([2], 4), ([4], 5)])
+        # split=3: front [1,3,2] compressed -> [[1,3],[2]]; tail [4],[5] 1-hot
+        self.assertEqual(_hybrid_steps_at_split(stream, 3), [([1, 3], 2), ([2], 4), ([4], 5)])
+
+    def test_choose_split_is_reproducible_and_in_bounds(self):
+        from scripts.train_phrase_gpt import _choose_split
+        boundaries = [0, 3, 5]
+        a = _choose_split(boundaries, seed=42, story_id=7)
+        b = _choose_split(boundaries, seed=42, story_id=7)
+        self.assertEqual(a, b)
+        self.assertIn(a, boundaries)
+
+    def test_hybrid_mode_dispatch_matches_endpoint_modes(self):
+        from scripts.train_phrase_gpt import examples_from_story_records, _canonical_token_stream, _hybrid_steps_at_split, _chunk_steps_into_examples
+        records = self._chain_story_records()
+        # whatever split the seed picks, the hybrid output must equal _hybrid_steps_at_split at that split
+        stream = _canonical_token_stream(records)
+        from scripts.train_phrase_gpt import _phrase_boundary_positions, _choose_split
+        split = _choose_split(_phrase_boundary_positions(stream), seed=123, story_id=int(stream[0].get("story_id", 0)))
+        expected = _chunk_steps_into_examples(_hybrid_steps_at_split(stream, split), sequence_len=10)
+        got = examples_from_story_records(records, sequence_len=10, chain_mode="hybrid", seed=123)
+        self.assertEqual(
+            [(e.input_indices, e.targets) for e in got],
+            [(e.input_indices, e.targets) for e in expected],
+        )
+
     def test_early_stopping_tracks_best_validation_loss_and_patience(self):
         config = EarlyStoppingConfig(patience=1, min_delta=0.01)
         state = EarlyStoppingState()
