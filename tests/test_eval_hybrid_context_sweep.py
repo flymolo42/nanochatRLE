@@ -134,6 +134,39 @@ class HybridSweepPureTests(unittest.TestCase):
         interior = result["x_sweep"]["0"]["interior"]["count"]
         self.assertEqual(opener + interior, x0)
 
+    def test_run_sweep_bootstrap_cis_present_reproducible_and_bracket_point(self):
+        import torch
+        from nanochat.gpt import GPT, GPTConfig
+        import nanochat.flash_attention as fa_module
+        from scripts.hybrid_sweep import build_sweep_probes, run_sweep
+
+        fa_module._override_impl = "sdpa"
+        fa_module.USE_FA3 = fa_module._resolve_use_fa3()
+        torch.manual_seed(0)
+        config = GPTConfig(sequence_len=8, vocab_size=8, n_layer=1, n_head=2, n_kv_head=2,
+                           n_embd=32, window_pattern="L", phrase_vocab_size=8)
+        model = GPT(config, pad_vocab_size_to=1); model.init_weights()
+        records = _story(0, [(0, [1, 3, 2]), (1, [4, 5])]) + _story(1, [(0, [1, 2]), (1, [3, 4, 5])])
+        probes = build_sweep_probes(records, min_history=1)
+
+        kw = dict(x_values=[0], d_values=[None], fixed_x_for_depth=0, remap=None, batch_size=4, device="cpu")
+        a = run_sweep(model, probes, bootstrap=200, bootstrap_seed=7, **kw)
+        b = run_sweep(model, probes, bootstrap=200, bootstrap_seed=7, **kw)
+        none = run_sweep(model, probes, bootstrap=0, **kw)
+
+        cell = a["x_sweep"]["0"]["all"]
+        for key in ("top1_ci", "top5_ci", "top10_ci", "mean_ce_ci", "perplexity_ci"):
+            self.assertIn(key, cell)
+            self.assertEqual(len(cell[key]), 2)
+            self.assertLessEqual(cell[key][0], cell[key][1])
+        # CI brackets the point estimate
+        self.assertLessEqual(cell["top1_ci"][0], cell["top1"])
+        self.assertLessEqual(cell["top1"], cell["top1_ci"][1])
+        # reproducible for a fixed seed
+        self.assertEqual(a["x_sweep"]["0"]["all"]["top1_ci"], b["x_sweep"]["0"]["all"]["top1_ci"])
+        # bootstrap=0 omits CI keys
+        self.assertNotIn("top1_ci", none["x_sweep"]["0"]["all"])
+
 
 if __name__ == "__main__":
     unittest.main()

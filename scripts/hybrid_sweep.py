@@ -122,25 +122,46 @@ def predict_probe_logits(model, contexts, batch_size, device):
     return torch.stack(rows)
 
 
+def _bootstrap_cis(per_probe, bootstrap, seed):
+    n = len(per_probe["ce"])
+    tensors = {k: torch.tensor(per_probe[k], dtype=torch.float64) for k in ("h1", "h5", "h10", "ce")}
+    generator = torch.Generator().manual_seed(int(seed))
+    idx = torch.randint(0, n, (bootstrap, n), generator=generator)
+
+    def ci(key):
+        samples = tensors[key][idx].mean(dim=1)
+        return [torch.quantile(samples, 0.025).item(), torch.quantile(samples, 0.975).item()]
+
+    ce_lo, ce_hi = ci("ce")
+    return {
+        "top1_ci": ci("h1"), "top5_ci": ci("h5"), "top10_ci": ci("h10"),
+        "mean_ce_ci": [ce_lo, ce_hi], "perplexity_ci": [math.exp(ce_lo), math.exp(ce_hi)],
+    }
+
+
 def _aggregate(probes, logits, remap, bootstrap=0, bootstrap_seed=0):
-    buckets = {name: {"top1": 0, "top5": 0, "top10": 0, "ce": 0.0, "count": 0}
-               for name in ("all", "opener", "interior")}
+    per = {name: {"h1": [], "h5": [], "h10": [], "ce": []} for name in ("all", "opener", "interior")}
     for probe, row in zip(probes, logits):
         target = int(remap[probe.token_indices[probe.target_pos]]) if remap is not None else probe.token_indices[probe.target_pos]
         hits, ce = topk_and_ce(row, target, ks=(1, 5, 10))
         for name in ("all", "opener" if probe.is_opener else "interior"):
-            b = buckets[name]
-            b["top1"] += hits[1]; b["top5"] += hits[5]; b["top10"] += hits[10]
-            b["ce"] += ce; b["count"] += 1
+            per[name]["h1"].append(hits[1]); per[name]["h5"].append(hits[5])
+            per[name]["h10"].append(hits[10]); per[name]["ce"].append(ce)
     out = {}
-    for name, b in buckets.items():
-        n = max(b["count"], 1)
-        mean_ce = b["ce"] / n
-        out[name] = {
-            "top1": b["top1"] / n, "top5": b["top5"] / n, "top10": b["top10"] / n,
-            "mean_ce": mean_ce, "perplexity": math.exp(mean_ce) if b["count"] else float("nan"),
-            "count": b["count"],
+    for name, arr in per.items():
+        n = len(arr["ce"])
+        mean_ce = (sum(arr["ce"]) / n) if n else float("nan")
+        cell = {
+            "top1": (sum(arr["h1"]) / n) if n else 0.0,
+            "top5": (sum(arr["h5"]) / n) if n else 0.0,
+            "top10": (sum(arr["h10"]) / n) if n else 0.0,
+            "mean_ce": mean_ce,
+            "perplexity": math.exp(mean_ce) if n else float("nan"),
+            "count": n,
         }
+        if bootstrap and n:
+            cell.update(_bootstrap_cis(arr, bootstrap, bootstrap_seed))
+        out[name] = cell
     return out
 
 
