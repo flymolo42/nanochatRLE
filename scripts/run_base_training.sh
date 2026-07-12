@@ -34,7 +34,7 @@ caffeinate -i uv run python -m scripts.train_phrase_gpt \
     --sequence-len 128 --depth 2 --n-embd 128 --n-head 4 \
     --batch-size 16 --lr 1e-3 --epochs 3 --vocab-top-k 8191 \
     --save-best --patience 1 --checkpoint-every-shards 2 \
-    "${RESUME_ARGS[@]}" 2>&1 | tee -a "$LOG" &
+    ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} 2>&1 | tee -a "$LOG" &
 TEE_PID=$!
 echo "$TEE_PID" > "$PIDFILE"
 
