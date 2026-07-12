@@ -126,5 +126,50 @@ class IndexMapTests(unittest.TestCase):
         self.assertEqual(example.targets, [5, 3])
 
 
+class ValidationRecordsTests(unittest.TestCase):
+    def _records(self, split, story_ids, base_index):
+        rows = []
+        for story_id in story_ids:
+            for token_pos, offset in enumerate(range(3)):
+                rows.append({
+                    "split": split, "story_id": story_id, "phrase_id": 0, "label": "punctuation",
+                    "start": 0, "end": 3, "record_type": "single",
+                    "indices": [base_index + offset], "token_pos": token_pos,
+                })
+        return rows
+
+    def test_validation_records_sharded_despite_example_limit(self):
+        train = self._records("train", [0, 1, 2, 3], base_index=10)
+        validation = self._records("validation", [0, 1], base_index=20)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = build_shards_from_records(
+                records=iter(train),
+                out_dir=tmpdir,
+                sequence_len=4,
+                examples_per_shard=10,
+                max_examples=2,
+                validation_records=iter(validation),
+            )
+        self.assertEqual(manifest["splits"]["train"]["num_examples"], 2)
+        # validation is exempt from the limit: both validation stories shard fully
+        self.assertEqual(manifest["splits"]["validation"]["num_examples"], 2)
+
+    def test_validation_records_respect_index_map(self):
+        validation = self._records("validation", [0], base_index=1)
+        index_map = [0, 7, 8, 9]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = build_shards_from_records(
+                records=iter([]),
+                out_dir=tmpdir,
+                sequence_len=4,
+                examples_per_shard=10,
+                index_map=index_map,
+                validation_records=iter(validation),
+            )
+            shard = torch.load(Path(tmpdir) / manifest["shards"][0]["file"], map_location="cpu", weights_only=False)
+        example = tensor_shard_to_examples(shard)[0]
+        self.assertEqual(example.targets, [8, 9])
+
+
 if __name__ == "__main__":
     unittest.main()

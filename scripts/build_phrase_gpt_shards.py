@@ -58,7 +58,7 @@ def _write_shard(out_dir, shard_index, examples, sequence_len, split):
     }
 
 
-def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token", split_seed=0, index_map=None):
+def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token", split_seed=0, index_map=None, validation_records=None):
     os.makedirs(out_dir, exist_ok=True)
     started_at = time.time()
     current_key = None
@@ -69,12 +69,16 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
     records_seen = 0
     stories_seen = 0
     examples_seen = 0
+    enforce_limit = True
+
+    def limit_reached():
+        return enforce_limit and max_examples is not None and examples_seen >= max_examples
 
     def add_examples(split, new_examples):
         nonlocal shards, examples_seen
         pending_examples = pending_examples_by_split.setdefault(split, [])
         for example in new_examples:
-            if max_examples is not None and examples_seen >= max_examples:
+            if limit_reached():
                 return False
             pending_examples.append(example)
             examples_seen += 1
@@ -86,29 +90,39 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
                 pending_examples = pending_examples_by_split[split]
         return True
 
-    for raw_record in records:
-        typed_records = [raw_record] if "record_type" in raw_record else _legacy_record_to_typed_records(raw_record)
-        records_seen += 1
-        if index_map is not None:
-            typed_records = [remap_record_indices(record, index_map) for record in typed_records]
-        for record in typed_records:
-            key = (record["split"], int(record["story_id"]))
-            if current_key is not None and key != current_key:
-                stories_seen += 1
-                if not add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed)):
+    def consume(stream):
+        nonlocal current_key, current_rows, records_seen, stories_seen
+        for raw_record in stream:
+            typed_records = [raw_record] if "record_type" in raw_record else _legacy_record_to_typed_records(raw_record)
+            records_seen += 1
+            if index_map is not None:
+                typed_records = [remap_record_indices(record, index_map) for record in typed_records]
+            for record in typed_records:
+                key = (record["split"], int(record["story_id"]))
+                if current_key is not None and key != current_key:
+                    stories_seen += 1
+                    if not add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed)):
+                        current_rows = []
+                        break
+                    if progress_every > 0 and stories_seen % progress_every == 0:
+                        print(f"sharded {stories_seen} stories; examples={examples_seen} records={records_seen} shards={len(shards)}", flush=True)
                     current_rows = []
-                    break
-                if progress_every > 0 and stories_seen % progress_every == 0:
-                    print(f"sharded {stories_seen} stories; examples={examples_seen} records={records_seen} shards={len(shards)}", flush=True)
-                current_rows = []
-            current_key = key
-            current_rows.append(record)
-        if max_examples is not None and examples_seen >= max_examples:
-            break
+                current_key = key
+                current_rows.append(record)
+            if limit_reached():
+                break
+        if current_rows and not limit_reached():
+            stories_seen += 1
+            add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed))
+        current_key = None
+        current_rows = []
 
-    if current_rows and (max_examples is None or examples_seen < max_examples):
-        stories_seen += 1
-        add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed))
+    consume(records)
+    if validation_records is not None:
+        # true-validation stream: exempt from max_examples so limited builds
+        # still carry a full validation split
+        enforce_limit = False
+        consume(validation_records)
 
     for split, pending_examples in list(pending_examples_by_split.items()):
         if pending_examples:
@@ -158,6 +172,7 @@ def parse_args():
     parser.add_argument("--chain-mode", choices=["token", "phrase", "cross-phrase", "hybrid", "hybrid-cross"], default="token", help="Per-timestep input construction. hybrid = compressed phrase history + a recent 1-hot token tail, split at a random phrase boundary per story. hybrid-cross = hybrid whose history chains continue across clause boundaries while ascending.")
     parser.add_argument("--split-seed", type=int, default=0, help="Seed for the hybrid random split point (per-story split = split_seed*1000003 + story_id). Ignored for non-hybrid modes.")
     parser.add_argument("--index-map", default=None, help="Path to old_to_new.json from scripts.reorder_phrase_vocab; remaps record indices on the fly. Pass the matching reordered vocab via --vocab.")
+    parser.add_argument("--validation-records", default=None, help="Separate validation records file, sharded in full regardless of --limit-examples (use with limited builds so a true validation split is still present).")
     return parser.parse_args()
 
 
@@ -183,6 +198,7 @@ def main():
         chain_mode=args.chain_mode,
         split_seed=args.split_seed,
         index_map=index_map,
+        validation_records=iter_records(args.validation_records) if args.validation_records else None,
     )
     print(json.dumps(manifest, indent=2))
 
