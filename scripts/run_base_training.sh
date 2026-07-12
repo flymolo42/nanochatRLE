@@ -43,7 +43,7 @@ echo "$TEE_PID" > "$PIDFILE"
         TRAIN_PID=$(pgrep -f "scripts.train_phrase_gpt" | head -1 || true)
         if [ -n "$TRAIN_PID" ]; then
             RSS_KB=$(ps -o rss= -p "$TRAIN_PID" | tr -d ' ' || echo 0)
-            echo "$(date '+%Y-%m-%d %H:%M:%S') pid=$TRAIN_PID rss_gb=$(awk "BEGIN{printf \"%.1f\", $RSS_KB/1048576}")" >> "$WATCHDOG_LOG"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') pid=$TRAIN_PID rss_mb=$((${RSS_KB:-0} / 1024))" >> "$WATCHDOG_LOG"
             if [ "${RSS_KB:-0}" -gt $((MAX_RSS_GB * 1048576)) ]; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') WATCHDOG: rss ${RSS_KB}KB > ${MAX_RSS_GB}GB, killing trainer" | tee -a "$WATCHDOG_LOG" >&2
                 pkill -f "scripts.train_phrase_gpt" || true
