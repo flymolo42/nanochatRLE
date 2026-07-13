@@ -35,7 +35,7 @@ TEE_PID=$!
 echo "$TEE_PID" > "$PIDFILE"
 (
     while kill -0 "$TEE_PID" 2>/dev/null; do
-        TRAIN_PID=$(pgrep -f "scripts.train_phrase_gpt" | head -1 || true)
+        TRAIN_PID=$(pgrep -f "python.*scripts.train_phrase_gpt" | head -1 || true)
         if [ -n "$TRAIN_PID" ]; then
             RSS_KB=$(ps -o rss= -p "$TRAIN_PID" | tr -d ' ' || echo 0)
             echo "$(date '+%Y-%m-%d %H:%M:%S') pid=$TRAIN_PID rss_mb=$((${RSS_KB:-0} / 1024))" >> "$WATCHDOG_LOG"
