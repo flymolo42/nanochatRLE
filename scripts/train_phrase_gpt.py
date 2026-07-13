@@ -388,6 +388,36 @@ def load_vocab_top_k_remap(path, top_k):
     return lookup, tokens
 
 
+def extend_phrase_vocab_state(checkpoint, extra_rows, n_embd, seed=0):
+    """Grow phrase_wte by extra_rows (normal 0, 0.02) and zero-pad matching
+    optimizer moment tensors so a resumed run can accept latent-id inputs.
+
+    Accepts both this trainer's on-disk checkpoint layout (top-level
+    "model_state_dict" / "optimizer_state_dict", the latter being the dict
+    returned by torch.optim.Optimizer.state_dict()) and the plain "model" /
+    "optimizer" layout used by tests, since the two key sets otherwise carry
+    identical structure (optimizer_state_dict already nests "state").
+    """
+    if extra_rows <= 0:
+        return checkpoint
+    model_key = "model" if "model" in checkpoint else "model_state_dict"
+    model_state = checkpoint[model_key]
+    key = next(k for k in model_state if k.endswith("phrase_wte.weight"))
+    old_weight = model_state[key]
+    old_rows = old_weight.shape[0]
+    generator = torch.Generator().manual_seed(seed)
+    new_rows = torch.normal(0.0, 0.02, size=(extra_rows, n_embd), generator=generator, dtype=old_weight.dtype)
+    model_state[key] = torch.cat([old_weight, new_rows.to(old_weight.device)], dim=0)
+    optimizer_key = "optimizer" if "optimizer" in checkpoint else "optimizer_state_dict"
+    optimizer_state = checkpoint.get(optimizer_key, {}).get("state", {})
+    for entry in optimizer_state.values():
+        for name, tensor in list(entry.items()):
+            if torch.is_tensor(tensor) and tensor.dim() == old_weight.dim() and tensor.shape[0] == old_rows and tensor.shape[1:] == old_weight.shape[1:] and name != "step":
+                pad = torch.zeros((extra_rows,) + tuple(tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device)
+                entry[name] = torch.cat([tensor, pad], dim=0)
+    return checkpoint
+
+
 def remap_tensor_shard(shard, lookup):
     remapped = dict(shard)
     remapped["phrase_indices"] = lookup[shard["phrase_indices"]]
@@ -601,6 +631,7 @@ def parse_args():
     parser.add_argument("--target-val-accuracy", type=float, default=None, help="Stop once validation accuracy is at or above this value.")
     parser.add_argument("--save-best", action="store_true", help="Also write best_phrase_gpt.pt whenever validation loss improves.")
     parser.add_argument("--resume", default=None, help="Path to a phrase_gpt.pt checkpoint to resume training from (restores model, optimizer, metrics history, and mid-epoch shard progress).")
+    parser.add_argument("--extend-phrase-vocab", type=int, default=0, help="Extra phrase-embedding rows (SAE latent ids) appended past the token vocab. Requires --resume.")
     parser.add_argument("--checkpoint-every-shards", type=int, default=10, help="In shard mode, write a resumable rolling checkpoint every N train shards. Use 0 to disable.")
     parser.add_argument("--vocab-top-k", type=int, default=None, help="Keep only the K most frequent phrase tokens; remap the rest to a trailing <unk> index at shard-load time. Requires --shards.")
     parser.add_argument("--limit-examples", type=int, default=None)
@@ -695,7 +726,7 @@ def main():
         n_kv_head=args.n_head,
         n_embd=args.n_embd,
         window_pattern="L",
-        phrase_vocab_size=vocab_size,
+        phrase_vocab_size=vocab_size + args.extend_phrase_vocab,
     )
     model = GPT(config).to(device)
     model.init_weights()
@@ -731,6 +762,8 @@ def main():
     prior_rows = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
+        if args.extend_phrase_vocab > 0:
+            checkpoint = extend_phrase_vocab_state(checkpoint, args.extend_phrase_vocab, args.n_embd, seed=args.seed)
         saved_config = checkpoint.get("config", {})
         if "vocab_top_k" in saved_config and saved_config["vocab_top_k"] != args.vocab_top_k:
             raise SystemExit(f"Checkpoint was trained with --vocab-top-k {saved_config['vocab_top_k']}, but got --vocab-top-k {args.vocab_top_k}.")
