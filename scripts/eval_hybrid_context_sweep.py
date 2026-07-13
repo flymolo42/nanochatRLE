@@ -63,7 +63,11 @@ def main():
         sae = load_sae(args.sae)
         lookup, tokens = load_vocab_top_k_remap(args.vocab, 8191)
         front_encoder = sae_front_encoder(sae, mode=args.sae_mode, window=args.sae_window, latent_offset=len(tokens), lookup=lookup, index_map=None)
-        remap = None  # probes already index-mapped; lookup handles top-8k; latent ids must not be re-remapped
+        # Keep `remap` (the vocab-sized ILS->top-8k lookup) even for --sae runs:
+        # it still scores the TARGET token in _aggregate and drives the
+        # classic_1hot baseline, neither of which touch SAE latent ids.
+        # _probe_contexts's front_encoder branch never re-remaps the front/tail
+        # steps it builds, so `remap` here cannot double-remap or corrupt them.
     print(f"probes={len(probes)} device={device} remap={'yes' if remap is not None else 'no'}", flush=True)
     # Compressed contexts longer than the model's sequence_len are truncated by the
     # final-layer attention window, so large D and unbounded D can coincide on long

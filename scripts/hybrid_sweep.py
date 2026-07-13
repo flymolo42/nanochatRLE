@@ -177,14 +177,21 @@ def _probe_contexts(probes, x, depth, remap, reset_on_clause=True, front_encoder
     for p in probes:
         if front_encoder is None:
             steps = context_steps_for_probe(p, x=x, depth=depth, reset_on_clause=reset_on_clause)
+            contexts.append(_remap_steps(steps, remap))
         else:
+            # front_encoder output is SAE latent ids (>= latent_offset) that live
+            # outside the vocab-sized `remap` lookup's range; the tail is already
+            # resolved through front_encoder.tail_lookup (the top-8k remap). Do
+            # NOT run either through _remap_steps -- `remap` here is only used
+            # (unconditionally, by the caller) for the classic_1hot baseline and
+            # for scoring the target token in _aggregate, both of which stay in
+            # original-token-id space.
             tail_start = max(0, p.target_pos - x)
             front = front_encoder(p.token_indices[:tail_start], p.clause_ids[:tail_start])
             if depth is not None:
                 front = front[-depth:]
             tail = [[int(front_encoder.tail_lookup[p.token_indices[i]])] for i in range(tail_start, p.target_pos)]
-            steps = front + tail
-        contexts.append(_remap_steps(steps, remap))
+            contexts.append(front + tail)
     return contexts
 
 

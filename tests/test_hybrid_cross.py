@@ -147,6 +147,77 @@ class SAEFrontEncoderTests(unittest.TestCase):
         self.assertTrue(all(latent_id >= 8 for latent_id in context[0]))
         self.assertEqual(context[1], [2])
 
+    def test_front_encoder_branch_is_not_remapped_with_nonnull_remap(self):
+        # Regression test for the Task 7 review finding: the CLI must be able to
+        # keep a real (non-None) top-k remap alongside --sae, because `remap` also
+        # scores the TARGET token (_aggregate) and the classic_1hot baseline. So
+        # _probe_contexts's front_encoder branch must never push its steps (front
+        # latent ids >= latent_offset, tail already mapped via tail_lookup) back
+        # through _remap_steps -- a non-None remap here would previously either
+        # IndexError (remap sized for the 8 token ids, front ids run 8..23) or
+        # silently corrupt the front slot's latent ids.
+        import torch
+        from scripts.build_sae_context_shards import sae_front_encoder
+        from scripts.hybrid_sweep import _probe_contexts
+        from scripts.sae import TopKSAE
+        torch.manual_seed(0)
+        sae = TopKSAE(input_dim=8, latent_dim=16, k=2)
+        encoder = sae_front_encoder(sae, mode="chain", window=4, latent_offset=8, lookup=torch.arange(8), index_map=None)
+        probe = SweepProbe(token_indices=[1, 3, 5, 2, 4], clause_ids=[0, 0, 1, 1, 1], target_pos=4, is_opener=False)
+        remap = torch.arange(8)  # only large enough for original token ids, NOT latent ids >= 8
+        contexts = _probe_contexts([probe], x=1, depth=None, remap=remap, front_encoder=encoder)
+        (context,) = contexts
+        # Would previously raise IndexError (or corrupt the front slot) once remap
+        # was non-None -- front latent ids must pass through untouched.
+        self.assertEqual(len(context), 2)
+        self.assertTrue(all(latent_id >= 8 for latent_id in context[0]))
+        self.assertEqual(context[1], [2])
+
+    def test_run_sweep_with_sae_front_encoder_and_remap_matches_classic_without_encoder(self):
+        # Integration regression test: run_sweep must complete end-to-end when a
+        # front_encoder AND a real (non-None) remap are both supplied -- the shape
+        # the fixed CLI now produces for --sae runs. classic_1hot never touches
+        # front_encoder, so it must be identical with or without one.
+        import torch
+        import nanochat.flash_attention as fa_module
+        from nanochat.gpt import GPT, GPTConfig
+        from scripts.build_sae_context_shards import sae_front_encoder
+        from scripts.hybrid_sweep import build_sweep_probes, run_sweep
+        from scripts.sae import TopKSAE
+
+        fa_module._override_impl = "sdpa"
+        fa_module.USE_FA3 = fa_module._resolve_use_fa3()
+        torch.manual_seed(0)
+        # phrase_vocab_size = 8 token ids + 16 SAE latent ids (offset 8) so latent
+        # ids up to 23 fit the phrase-multihot embedding table; vocab_size=8 stays
+        # the target/output-head space (post top-k remap).
+        config = GPTConfig(sequence_len=8, vocab_size=8, n_layer=1, n_head=2, n_kv_head=2,
+                           n_embd=32, window_pattern="L", phrase_vocab_size=8 + 16)
+        model = GPT(config, pad_vocab_size_to=1)
+        model.init_weights()
+
+        records = _story(0, [(0, [1, 3, 2]), (1, [4, 5])]) + _story(1, [(0, [1, 2]), (1, [3, 4, 5])])
+        probes = build_sweep_probes(iter(records), min_history=1)
+
+        sae = TopKSAE(input_dim=8, latent_dim=16, k=2)
+        encoder = sae_front_encoder(sae, mode="chain", window=4, latent_offset=8, lookup=torch.arange(8), index_map=None)
+        remap = torch.arange(8)
+
+        result_with_encoder = run_sweep(model, probes, x_values=[1], d_values=[None],
+                                         fixed_x_for_depth=0, remap=remap, batch_size=4, device="cpu",
+                                         front_encoder=encoder)
+        result_without_encoder = run_sweep(model, probes, x_values=[1], d_values=[None],
+                                            fixed_x_for_depth=0, remap=remap, batch_size=4, device="cpu",
+                                            front_encoder=None)
+
+        self.assertIn("x_sweep", result_with_encoder)
+        self.assertIn("d_sweep", result_with_encoder)
+        self.assertIn("classic_1hot", result_with_encoder)
+        # classic is the uncompressed baseline and is defined independently of
+        # front_encoder -- it must match byte-for-byte whether or not a front
+        # encoder was supplied.
+        self.assertEqual(result_with_encoder["classic_1hot"], result_without_encoder["classic_1hot"])
+
 
 if __name__ == "__main__":
     unittest.main()
