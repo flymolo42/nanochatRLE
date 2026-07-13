@@ -389,14 +389,16 @@ def load_vocab_top_k_remap(path, top_k):
 
 
 def extend_phrase_vocab_state(checkpoint, extra_rows, n_embd, seed=0):
-    """Grow phrase_wte by extra_rows (normal 0, 0.02) and zero-pad matching
-    optimizer moment tensors so a resumed run can accept latent-id inputs.
+    """Grow phrase_wte by extra_rows (normal 0, 0.02) so a resumed run can
+    accept latent-id inputs. Only touches the model weight tensor, resolved
+    by name -- NOT optimizer state. Optimizer moments for phrase_wte must be
+    padded separately by param identity (see pad_phrase_optimizer_state),
+    because in a real checkpoint wte/lm_head/phrase_wte optimizer moments can
+    share phrase_wte's exact old shape (all == vocab_size rows) and a
+    shape-based rule cannot tell them apart.
 
     Accepts both this trainer's on-disk checkpoint layout (top-level
-    "model_state_dict" / "optimizer_state_dict", the latter being the dict
-    returned by torch.optim.Optimizer.state_dict()) and the plain "model" /
-    "optimizer" layout used by tests, since the two key sets otherwise carry
-    identical structure (optimizer_state_dict already nests "state").
+    "model_state_dict") and the plain "model" layout used by tests.
     """
     if extra_rows <= 0:
         return checkpoint
@@ -404,17 +406,45 @@ def extend_phrase_vocab_state(checkpoint, extra_rows, n_embd, seed=0):
     model_state = checkpoint[model_key]
     key = next(k for k in model_state if k.endswith("phrase_wte.weight"))
     old_weight = model_state[key]
-    old_rows = old_weight.shape[0]
     generator = torch.Generator().manual_seed(seed)
     new_rows = torch.normal(0.0, 0.02, size=(extra_rows, n_embd), generator=generator, dtype=old_weight.dtype)
     model_state[key] = torch.cat([old_weight, new_rows.to(old_weight.device)], dim=0)
+    return checkpoint
+
+
+def pad_phrase_optimizer_state(checkpoint, model, optimizer, extra_rows):
+    """Zero-pad the AdamW moment tensors belonging to model.phrase_wte.weight
+    in checkpoint's saved optimizer state, resolved by PARAM IDENTITY (not
+    shape). Must be called after `model` and `optimizer` are built with the
+    already-extended phrase_vocab_size (so model.phrase_wte.weight already has
+    the new row count) and before optimizer.load_state_dict(...).
+
+    Shape-based padding is unsafe here: in the real deployment checkpoint,
+    wte and lm_head optimizer moments have the exact same shape as
+    phrase_wte's (all vocab_size rows), so a shape rule would wrongly pad
+    them too -- model.load_state_dict succeeds regardless (it never sees
+    optimizer state), optimizer.load_state_dict accepts the corrupted sizes
+    silently, and the first optimizer.step() then crashes with a shape
+    mismatch (or worse, silently misaligns moments to weights).
+    """
+    if extra_rows <= 0:
+        return checkpoint
+    params = [p for group in optimizer.param_groups for p in group["params"]]
+    phrase_weight = model.phrase_wte.weight
+    param_index = next(i for i, p in enumerate(params) if p is phrase_weight)
+    old_rows = phrase_weight.shape[0] - extra_rows
     optimizer_key = "optimizer" if "optimizer" in checkpoint else "optimizer_state_dict"
     optimizer_state = checkpoint.get(optimizer_key, {}).get("state", {})
-    for entry in optimizer_state.values():
-        for name, tensor in list(entry.items()):
-            if torch.is_tensor(tensor) and tensor.dim() == old_weight.dim() and tensor.shape[0] == old_rows and tensor.shape[1:] == old_weight.shape[1:] and name != "step":
-                pad = torch.zeros((extra_rows,) + tuple(tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device)
-                entry[name] = torch.cat([tensor, pad], dim=0)
+    entry = optimizer_state.get(param_index)
+    if entry is None:
+        return checkpoint
+    for name, tensor in list(entry.items()):
+        if name == "step" or not torch.is_tensor(tensor) or not torch.is_floating_point(tensor):
+            continue
+        if tensor.dim() == 0 or tensor.shape[0] != old_rows:
+            continue
+        pad = torch.zeros((extra_rows,) + tuple(tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device)
+        entry[name] = torch.cat([tensor, pad], dim=0)
     return checkpoint
 
 
@@ -769,6 +799,8 @@ def main():
             raise SystemExit(f"Checkpoint was trained with --vocab-top-k {saved_config['vocab_top_k']}, but got --vocab-top-k {args.vocab_top_k}.")
         model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint:
+            if args.extend_phrase_vocab > 0:
+                checkpoint = pad_phrase_optimizer_state(checkpoint, model, optimizer, args.extend_phrase_vocab)
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         saved_metrics = checkpoint.get("metrics", {})
         metrics["epochs"] = list(saved_metrics.get("epochs", []))
