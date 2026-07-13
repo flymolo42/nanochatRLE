@@ -94,5 +94,41 @@ class SweepIndexMapTests(unittest.TestCase):
         self.assertEqual(probes[0].token_indices, [1, 3, 0, 2])
 
 
+class ClassicContextTests(unittest.TestCase):
+    def test_classic_context_steps_is_full_one_hot_history(self):
+        from scripts.hybrid_sweep import classic_context_steps
+        probe = SweepProbe(token_indices=[1, 3, 5, 2, 4], clause_ids=[0, 0, 1, 1, 1], target_pos=3, is_opener=False)
+        self.assertEqual(classic_context_steps(probe), [[1], [3], [5]])
+
+    def test_run_sweep_reports_classic_matching_full_tail_x(self):
+        import torch
+        import nanochat.flash_attention as fa_module
+        from nanochat.gpt import GPT, GPTConfig
+        from scripts.hybrid_sweep import build_sweep_probes, run_sweep
+
+        fa_module._override_impl = "sdpa"
+        fa_module.USE_FA3 = fa_module._resolve_use_fa3()
+        torch.manual_seed(0)
+        config = GPTConfig(sequence_len=8, vocab_size=8, n_layer=1, n_head=2, n_kv_head=2,
+                           n_embd=32, window_pattern="L", phrase_vocab_size=8)
+        model = GPT(config, pad_vocab_size_to=1)
+        model.init_weights()
+
+        records = _story(0, [(0, [1, 3, 2]), (1, [4, 5])]) + _story(1, [(0, [1, 2]), (1, [3, 4, 5])])
+        probes = build_sweep_probes(iter(records), min_history=1)
+        result = run_sweep(model, probes, x_values=[99], d_values=[None],
+                           fixed_x_for_depth=0, remap=None, batch_size=4, device="cpu")
+
+        self.assertIn("classic_1hot", result)
+        classic = result["classic_1hot"]["all"]
+        self.assertEqual(classic["count"], len(probes))
+        for key in ("top1", "top5", "top10", "mean_ce", "perplexity"):
+            self.assertIn(key, classic)
+        # x=99 tail covers every probe's whole history -> identical contexts -> identical metrics
+        full_tail = result["x_sweep"]["99"]["all"]
+        self.assertEqual(classic["top1"], full_tail["top1"])
+        self.assertAlmostEqual(classic["mean_ce"], full_tail["mean_ce"], places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -166,6 +166,12 @@ def _aggregate(probes, logits, remap, bootstrap=0, bootstrap_seed=0):
     return out
 
 
+def classic_context_steps(probe):
+    """Full 1-hot history: every context token as its own singleton step
+    (the classic uncompressed baseline)."""
+    return [[int(index)] for index in probe.token_indices[:probe.target_pos]]
+
+
 def _probe_contexts(probes, x, depth, remap, reset_on_clause=True):
     return [
         _remap_steps(context_steps_for_probe(p, x=x, depth=depth, reset_on_clause=reset_on_clause), remap)
@@ -184,6 +190,9 @@ def run_sweep(model, probes, x_values, d_values, fixed_x_for_depth, remap, batch
         contexts = _probe_contexts(probes, x=fixed_x_for_depth, depth=d, remap=remap, reset_on_clause=reset_on_clause)
         logits = predict_probe_logits(model, contexts, batch_size, device)
         result["d_sweep"][str(d)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
+    contexts = [_remap_steps(classic_context_steps(p), remap) for p in probes]
+    logits = predict_probe_logits(model, contexts, batch_size, device)
+    result["classic_1hot"] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
     return result
 
 
