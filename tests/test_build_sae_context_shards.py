@@ -43,6 +43,32 @@ class SAEStepsTests(unittest.TestCase):
         b = sae_steps_for_story(stream, None, self.lookup, self.sae, "chain", 4, split_seed=42, story_id=7, latent_offset=8)
         self.assertEqual(a, b)
 
+    def test_front_to_front_step_targets_next_bags_first_token(self):
+        # front segments into TWO chain bags: [1,3] then [2,5] (index 2 <= current
+        # last value 3 resets the chain); tail is a single chain [4,6]. This mirrors
+        # _steps_from_chains in train_phrase_gpt.py, which the spec says these SAE
+        # shards must match: every slot position emits a step, and a front slot's
+        # target is the next slot's first token -- even when that next slot is
+        # itself another (compressed) front slot, not just a 1-hot tail token.
+        stream = [(0, 1), (0, 3), (0, 2), (0, 5), (1, 4), (1, 6)]
+        steps = sae_steps_for_story(
+            stream, index_map=None, lookup=self.lookup, sae=self.sae,
+            mode="chain", window=4, split_seed=None, story_id=0, latent_offset=8,
+            force_split=4,  # front = first 4 tokens (2 chain bags), tail = last 2
+        )
+        # front bag 0 -> front bag 1's first token (2); front bag 1 -> tail's
+        # first token (4); tail(4) -> tail(6).
+        self.assertEqual([target for _, target in steps], [2, 4, 6])
+        self.assertEqual(len(steps), 3)
+        # step 0 is a front->front step: its source is bag-0's latent-id slot,
+        # not a raw token id.
+        self.assertTrue(all(8 <= latent_id < 8 + 16 for latent_id in steps[0][0]))
+        # step 1 is also a front->front-adjacent step: its source is bag-1's
+        # latent-id slot.
+        self.assertTrue(all(8 <= latent_id < 8 + 16 for latent_id in steps[1][0]))
+        # step 2 is the tail->tail step: its source is the 1-hot tail token.
+        self.assertEqual(steps[2][0], [4])
+
 
 if __name__ == "__main__":
     unittest.main()

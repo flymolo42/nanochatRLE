@@ -2,7 +2,11 @@ import unittest
 
 import torch
 
-from scripts.train_phrase_gpt import extend_phrase_vocab_state, pad_phrase_optimizer_state
+from scripts.train_phrase_gpt import (
+    extend_phrase_vocab_state,
+    pad_phrase_optimizer_state,
+    resolve_resume_vocab_top_k,
+)
 
 
 def _use_sdpa():
@@ -45,6 +49,35 @@ class ExtendPhraseVocabTests(unittest.TestCase):
     def test_untouched_when_extra_rows_zero(self):
         checkpoint = extend_phrase_vocab_state(self._checkpoint(), extra_rows=0, n_embd=2, seed=0)
         self.assertEqual(checkpoint["model"]["phrase_wte.weight"].shape, (6, 2))
+
+    def test_idempotent_when_already_extended(self):
+        # Runner restart: --resume points at a checkpoint this trainer already
+        # extended once (e.g. its own phrase_gpt.pt from a prior --extend-phrase-vocab
+        # run). Re-running extend_phrase_vocab_state with the same extra_rows must
+        # NOT append another batch of rows on top -- that would grow phrase_wte past
+        # what the (fixed) model config expects and crash model.load_state_dict.
+        vocab_size = 6
+        extra_rows = 4
+        checkpoint = self._checkpoint()  # phrase_wte already has vocab_size (6) rows
+        already_extended = extend_phrase_vocab_state(checkpoint, extra_rows=extra_rows, n_embd=2, seed=0, vocab_size=vocab_size)
+        weight_after_first_extend = already_extended["model"]["phrase_wte.weight"].clone()
+        self.assertEqual(weight_after_first_extend.shape, (vocab_size + extra_rows, 2))
+
+        # Simulate the restart: same checkpoint (already at target rows) passed
+        # through extend_phrase_vocab_state again with the same extra_rows/vocab_size.
+        result = extend_phrase_vocab_state(already_extended, extra_rows=extra_rows, n_embd=2, seed=1, vocab_size=vocab_size)
+        weight_after_second_call = result["model"]["phrase_wte.weight"]
+        self.assertEqual(weight_after_second_call.shape, (vocab_size + extra_rows, 2))
+        self.assertTrue(torch.equal(weight_after_second_call, weight_after_first_extend))
+
+    def test_still_extends_when_vocab_size_given_and_not_yet_extended(self):
+        # vocab_size threaded in, but checkpoint is still at the base row count:
+        # normal extension must still happen (vocab_size param must not itself
+        # suppress a legitimate first extension).
+        vocab_size = 6
+        checkpoint = extend_phrase_vocab_state(self._checkpoint(), extra_rows=4, n_embd=2, seed=0, vocab_size=vocab_size)
+        weight = checkpoint["model"]["phrase_wte.weight"]
+        self.assertEqual(weight.shape, (10, 2))
 
     def test_uses_model_state_dict_key_fallback(self):
         # Real on-disk checkpoints use "model_state_dict", not "model". This was
@@ -127,6 +160,34 @@ class PadPhraseOptimizerStateTests(unittest.TestCase):
         # should not raise even though there's nothing to pad
         result = pad_phrase_optimizer_state(checkpoint, model, optimizer, extra_rows=4)
         self.assertEqual(result["optimizer_state_dict"]["state"], {})
+
+    def test_idempotent_when_moments_already_at_extended_row_count(self):
+        # Runner restart: model is (always) built with the extended phrase_vocab_size
+        # (12 = base 8 + extra 4), but the RESUMED checkpoint's optimizer moments were
+        # already padded to 12 rows by a prior run. Padding again (same extra_rows,
+        # same vocab_size) must be a no-op, not append a second batch of zero rows.
+        vocab_size = 8
+        extra_rows = 4
+        model, optimizer = self._model_and_optimizer(phrase_vocab_size=vocab_size + extra_rows, vocab_size=vocab_size)
+        phrase_index = self._param_index(optimizer, model.phrase_wte.weight)
+        already_padded_exp_avg = torch.cat([torch.ones(vocab_size, 24), torch.zeros(extra_rows, 24)], dim=0)
+        checkpoint = {
+            "model_state_dict": {},
+            "optimizer_state_dict": {
+                "state": {
+                    phrase_index: {
+                        "exp_avg": already_padded_exp_avg.clone(),
+                        "exp_avg_sq": already_padded_exp_avg.clone(),
+                        "step": torch.tensor(5.0),
+                    },
+                },
+                "param_groups": [],
+            },
+        }
+        result = pad_phrase_optimizer_state(checkpoint, model, optimizer, extra_rows=extra_rows, vocab_size=vocab_size)
+        entry = result["optimizer_state_dict"]["state"][phrase_index]
+        self.assertEqual(entry["exp_avg"].shape, (vocab_size + extra_rows, 24))
+        self.assertTrue(torch.equal(entry["exp_avg"], already_padded_exp_avg))
 
 
 class SurgeryIntegrationTests(unittest.TestCase):
@@ -222,6 +283,40 @@ class OptimizerCollisionRegressionTests(unittest.TestCase):
         # And the extended model/optimizer must actually be usable: a further
         # optimizer.step() must not crash with a shape-mismatch RuntimeError.
         self._step(model2, optimizer2, vocab_size, old_phrase_rows + extra_rows)
+
+
+class ResolveResumeVocabTopKTests(unittest.TestCase):
+    """B1: SAE post-train resumes a --vocab-top-k-trained base checkpoint WITHOUT
+    --vocab-top-k (its shards are pre-remapped already). The old behavior raised
+    SystemExit on any mismatch between the checkpoint's recorded vocab_top_k and
+    the requested one; that must only still raise for a REAL mismatch, and must
+    inherit the checkpoint's vocab_top_k as the effective value to record in this
+    run's own saved checkpoints when extending the phrase vocab with no
+    --vocab-top-k requested."""
+
+    def test_matching_values_pass_through(self):
+        self.assertEqual(resolve_resume_vocab_top_k(8191, 8191, extend_phrase_vocab=0), 8191)
+
+    def test_both_none_pass_through(self):
+        self.assertEqual(resolve_resume_vocab_top_k(None, None, extend_phrase_vocab=0), None)
+
+    def test_mismatch_without_extend_raises(self):
+        with self.assertRaises(SystemExit):
+            resolve_resume_vocab_top_k(8191, None, extend_phrase_vocab=0)
+
+    def test_mismatch_with_extend_but_explicit_conflicting_top_k_still_raises(self):
+        # extend_phrase_vocab > 0 alone doesn't waive the check -- only the
+        # specific SAE post-train shape (requested top-k is None) does.
+        with self.assertRaises(SystemExit):
+            resolve_resume_vocab_top_k(8191, 4000, extend_phrase_vocab=136)
+
+    def test_sae_extend_inherits_checkpoint_top_k_without_raising(self):
+        # The actual SAE post-train case: checkpoint was trained with
+        # --vocab-top-k 8191, this run passes no --vocab-top-k (None) but does
+        # pass --extend-phrase-vocab. Effective value used for THIS run's saved
+        # checkpoints must be the inherited 8191, not None.
+        effective = resolve_resume_vocab_top_k(8191, None, extend_phrase_vocab=136)
+        self.assertEqual(effective, 8191)
 
 
 if __name__ == "__main__":

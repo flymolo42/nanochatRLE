@@ -43,25 +43,34 @@ def _clause_boundaries(stream):
 
 
 def _encode_front(front_stream, index_map, lookup, sae, mode, window, latent_offset):
+    """Returns (slots, first_tokens): one SAE latent-id slot per front bag, and
+    that bag's first token (in top-k lookup space) for use as a front->front
+    step target. The first token MUST be captured from the raw bag (story
+    order) BEFORE remap_bags, which sorts+dedups each bag's contents -- after
+    that, bag[0] is just the smallest remapped id, not the true first token."""
     if not front_stream:
-        return []
+        return [], []
     if mode == "chain":
         bags = chain_bags_from_stream(front_stream, index_map)
     else:
         bags = window_bags_from_stream(front_stream, index_map, window=window)
-    bags = remap_bags(bags, lookup)
-    dense = bags_to_dense(bags, sae.input_dim)
+    first_tokens = [int(lookup[bag[0]]) for bag in bags]
+    remapped_bags = remap_bags(bags, lookup)
+    dense = bags_to_dense(remapped_bags, sae.input_dim)
     with torch.no_grad():
         _, indices = sae.encode(dense)
-    return [sorted(latent_offset + latent for latent in set(row.tolist())) for row in indices]
+    slots = [sorted(latent_offset + latent for latent in set(row.tolist())) for row in indices]
+    return slots, first_tokens
 
 
 def sae_front_encoder(sae, mode, window, latent_offset, lookup, index_map):
     """Returns callable(front_tokens, front_clauses) -> list of latent-id slots,
-    for use as hybrid_sweep run_sweep(front_encoder=...)."""
+    for use as hybrid_sweep run_sweep(front_encoder=...). Contexts-only: the
+    sweep never needs step targets, so the per-bag first tokens are dropped."""
     def encode(front_tokens, front_clauses):
         stream = list(zip(front_clauses, front_tokens))
-        return _encode_front(stream, index_map, lookup, sae, mode, window, latent_offset)
+        slots, _first_tokens = _encode_front(stream, index_map, lookup, sae, mode, window, latent_offset)
+        return slots
     encode.tail_lookup = lookup
     return encode
 
@@ -77,21 +86,26 @@ def sae_steps_for_story(stream, index_map, lookup, sae, mode, window, split_seed
     front = stream[:split]
     back = stream[split:]
     tail_tokens = [int(lookup[int(index_map[idx]) if index_map is not None else int(idx)]) for _, idx in back]
-    slots = _encode_front(front, index_map, lookup, sae, mode, window, latent_offset)
-    slots.extend([token] for token in tail_tokens)
-    return _steps(slots, tail_tokens, len(front))
+    front_slots, front_first_tokens = _encode_front(front, index_map, lookup, sae, mode, window, latent_offset)
+    slots = front_slots + [[token] for token in tail_tokens]
+    return _steps(slots, tail_tokens, front_first_tokens)
 
 
-def _steps(slots, tail_tokens, front_len):
-    # target of each step is the FIRST token of the next slot; only tail slots
-    # (1-hot) can be targets, and every slot after the front is a tail slot.
+def _steps(slots, tail_tokens, front_first_tokens):
+    # target of each step is the first token of the NEXT slot. This mirrors
+    # _steps_from_chains in train_phrase_gpt.py: every slot position emits a
+    # step, including front->front positions -- a front slot's target is the
+    # next front bag's first token (captured pre-remap by _encode_front), not
+    # just the next tail token once the front is exhausted.
     steps = []
-    num_front = len(slots) - len(tail_tokens)
+    num_front = len(front_first_tokens)
     for position in range(len(slots) - 1):
-        next_slot_tail_index = position + 1 - num_front
-        if next_slot_tail_index < 0:
-            continue  # next slot is still a compressed front slot: no token target
-        steps.append((slots[position], tail_tokens[next_slot_tail_index]))
+        next_position = position + 1
+        if next_position < num_front:
+            target = front_first_tokens[next_position]
+        else:
+            target = tail_tokens[next_position - num_front]
+        steps.append((slots[position], target))
     return steps
 
 

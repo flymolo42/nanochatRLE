@@ -61,7 +61,16 @@ def main():
         from scripts.sae import load_sae
         from scripts.train_phrase_gpt import load_vocab_top_k_remap
         sae = load_sae(args.sae)
-        lookup, tokens = load_vocab_top_k_remap(args.vocab, 8191)
+        # Derive vocab_top_k from the checkpoint's own recorded config rather than
+        # hardcoding 8191 -- with the B1 trainer fix, an SAE post-train checkpoint's
+        # saved config.vocab_top_k is the INHERITED value from the base checkpoint it
+        # resumed (the SAE run itself passes no --vocab-top-k), so this is the only
+        # reliable source. latent_offset must be top_k + 1 (== len(tokens): the top_k
+        # kept tokens plus the trailing <unk>), matching how the shards were built.
+        checkpoint_top_k = checkpoint.get("config", {}).get("vocab_top_k")
+        if not checkpoint_top_k:
+            raise SystemExit("--sae requires a checkpoint with a recorded vocab_top_k (an SAE post-train checkpoint); none found in checkpoint config.")
+        lookup, tokens = load_vocab_top_k_remap(args.vocab, checkpoint_top_k)
         front_encoder = sae_front_encoder(sae, mode=args.sae_mode, window=args.sae_window, latent_offset=len(tokens), lookup=lookup, index_map=None)
         # Keep `remap` (the vocab-sized ILS->top-8k lookup) even for --sae runs:
         # it still scores the TARGET token in _aggregate and drives the

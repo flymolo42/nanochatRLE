@@ -388,7 +388,7 @@ def load_vocab_top_k_remap(path, top_k):
     return lookup, tokens
 
 
-def extend_phrase_vocab_state(checkpoint, extra_rows, n_embd, seed=0):
+def extend_phrase_vocab_state(checkpoint, extra_rows, n_embd, seed=0, vocab_size=None):
     """Grow phrase_wte by extra_rows (normal 0, 0.02) so a resumed run can
     accept latent-id inputs. Only touches the model weight tensor, resolved
     by name -- NOT optimizer state. Optimizer moments for phrase_wte must be
@@ -399,6 +399,12 @@ def extend_phrase_vocab_state(checkpoint, extra_rows, n_embd, seed=0):
 
     Accepts both this trainer's on-disk checkpoint layout (top-level
     "model_state_dict") and the plain "model" layout used by tests.
+
+    Idempotent when `vocab_size` is given: if phrase_wte.weight already has
+    vocab_size + extra_rows rows, the checkpoint is already extended (e.g. a
+    runner restart resuming its own previously-extended checkpoint) and this
+    is a no-op. Without `vocab_size`, always extends (legacy behavior, used
+    by callers that don't have a stable target row count to compare against).
     """
     if extra_rows <= 0:
         return checkpoint
@@ -406,13 +412,15 @@ def extend_phrase_vocab_state(checkpoint, extra_rows, n_embd, seed=0):
     model_state = checkpoint[model_key]
     key = next(k for k in model_state if k.endswith("phrase_wte.weight"))
     old_weight = model_state[key]
+    if vocab_size is not None and old_weight.shape[0] >= vocab_size + extra_rows:
+        return checkpoint
     generator = torch.Generator().manual_seed(seed)
     new_rows = torch.normal(0.0, 0.02, size=(extra_rows, n_embd), generator=generator, dtype=old_weight.dtype)
     model_state[key] = torch.cat([old_weight, new_rows.to(old_weight.device)], dim=0)
     return checkpoint
 
 
-def pad_phrase_optimizer_state(checkpoint, model, optimizer, extra_rows):
+def pad_phrase_optimizer_state(checkpoint, model, optimizer, extra_rows, vocab_size=None):
     """Zero-pad the AdamW moment tensors belonging to model.phrase_wte.weight
     in checkpoint's saved optimizer state, resolved by PARAM IDENTITY (not
     shape). Must be called after `model` and `optimizer` are built with the
@@ -426,13 +434,21 @@ def pad_phrase_optimizer_state(checkpoint, model, optimizer, extra_rows):
     optimizer state), optimizer.load_state_dict accepts the corrupted sizes
     silently, and the first optimizer.step() then crashes with a shape
     mismatch (or worse, silently misaligns moments to weights).
+
+    Idempotent: `model`'s phrase_wte row count is fixed by config regardless
+    of resume history, so `old_rows` (the row count BEFORE this extension) is
+    derived from `vocab_size` when given, else from the model shape as before.
+    Either way, a phrase_wte moment tensor that's already at the extended row
+    count (vocab_size + extra_rows, e.g. from a runner restart resuming a
+    checkpoint this trainer already padded once) won't match `old_rows` and is
+    left untouched by the per-tensor shape check below -- no double padding.
     """
     if extra_rows <= 0:
         return checkpoint
     params = [p for group in optimizer.param_groups for p in group["params"]]
     phrase_weight = model.phrase_wte.weight
     param_index = next(i for i, p in enumerate(params) if p is phrase_weight)
-    old_rows = phrase_weight.shape[0] - extra_rows
+    old_rows = vocab_size if vocab_size is not None else phrase_weight.shape[0] - extra_rows
     optimizer_key = "optimizer" if "optimizer" in checkpoint else "optimizer_state_dict"
     optimizer_state = checkpoint.get(optimizer_key, {}).get("state", {})
     entry = optimizer_state.get(param_index)
@@ -446,6 +462,32 @@ def pad_phrase_optimizer_state(checkpoint, model, optimizer, extra_rows):
         pad = torch.zeros((extra_rows,) + tuple(tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device)
         entry[name] = torch.cat([tensor, pad], dim=0)
     return checkpoint
+
+
+def resolve_resume_vocab_top_k(saved_vocab_top_k, requested_vocab_top_k, extend_phrase_vocab):
+    """Reconcile a resumed checkpoint's recorded vocab_top_k with the one
+    requested on this run's CLI (args.vocab_top_k). Returns the EFFECTIVE
+    vocab_top_k to record in this run's own saved checkpoints.
+
+    SAE post-train resumes a --vocab-top-k-trained base checkpoint WITHOUT
+    --vocab-top-k, because its shards are pre-remapped already (no remap
+    should be applied again at shard-load time). That means
+    saved_vocab_top_k (e.g. 8191) and requested_vocab_top_k (None) will
+    legitimately differ whenever --extend-phrase-vocab is used and no
+    --vocab-top-k was requested -- in that one case, inherit the checkpoint's
+    value as the effective one instead of raising. The caller must NOT feed
+    this return value back into the shard-load remap decision (that stays
+    keyed off the raw requested_vocab_top_k / args.vocab_top_k, which must
+    stay None so shards are loaded unremapped, as they already are).
+
+    Any other mismatch (no --extend-phrase-vocab, or an explicit conflicting
+    --vocab-top-k) is a real error and still raises.
+    """
+    if saved_vocab_top_k == requested_vocab_top_k:
+        return requested_vocab_top_k
+    if extend_phrase_vocab > 0 and requested_vocab_top_k is None:
+        return saved_vocab_top_k
+    raise SystemExit(f"Checkpoint was trained with --vocab-top-k {saved_vocab_top_k}, but got --vocab-top-k {requested_vocab_top_k}.")
 
 
 def remap_tensor_shard(shard, lookup):
@@ -793,14 +835,20 @@ def main():
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         if args.extend_phrase_vocab > 0:
-            checkpoint = extend_phrase_vocab_state(checkpoint, args.extend_phrase_vocab, args.n_embd, seed=args.seed)
+            checkpoint = extend_phrase_vocab_state(checkpoint, args.extend_phrase_vocab, args.n_embd, seed=args.seed, vocab_size=vocab_size)
         saved_config = checkpoint.get("config", {})
-        if "vocab_top_k" in saved_config and saved_config["vocab_top_k"] != args.vocab_top_k:
-            raise SystemExit(f"Checkpoint was trained with --vocab-top-k {saved_config['vocab_top_k']}, but got --vocab-top-k {args.vocab_top_k}.")
+        if "vocab_top_k" in saved_config:
+            effective_vocab_top_k = resolve_resume_vocab_top_k(saved_config["vocab_top_k"], args.vocab_top_k, args.extend_phrase_vocab)
+            if effective_vocab_top_k != args.vocab_top_k:
+                # SAE post-train: inherited from the checkpoint for bookkeeping only.
+                # args.vocab_top_k itself stays None, so vocab_remap above (built
+                # only from args.vocab_top_k) stays None too -- shards are loaded
+                # unremapped, as they must be (they're pre-remapped already).
+                checkpoint_config["vocab_top_k"] = effective_vocab_top_k
         model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint:
             if args.extend_phrase_vocab > 0:
-                checkpoint = pad_phrase_optimizer_state(checkpoint, model, optimizer, args.extend_phrase_vocab)
+                checkpoint = pad_phrase_optimizer_state(checkpoint, model, optimizer, args.extend_phrase_vocab, vocab_size=vocab_size)
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         saved_metrics = checkpoint.get("metrics", {})
         metrics["epochs"] = list(saved_metrics.get("epochs", []))
