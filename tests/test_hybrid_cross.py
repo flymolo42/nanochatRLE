@@ -130,5 +130,23 @@ class ClassicContextTests(unittest.TestCase):
         self.assertAlmostEqual(classic["mean_ce"], full_tail["mean_ce"], places=6)
 
 
+class SAEFrontEncoderTests(unittest.TestCase):
+    def test_sae_front_encoder_replaces_front_chains(self):
+        import torch
+        from scripts.build_sae_context_shards import sae_front_encoder
+        from scripts.hybrid_sweep import _probe_contexts
+        from scripts.sae import TopKSAE
+        torch.manual_seed(0)
+        sae = TopKSAE(input_dim=8, latent_dim=16, k=2)
+        encoder = sae_front_encoder(sae, mode="chain", window=4, latent_offset=8, lookup=torch.arange(8), index_map=None)
+        probe = SweepProbe(token_indices=[1, 3, 5, 2, 4], clause_ids=[0, 0, 1, 1, 1], target_pos=4, is_opener=False)
+        contexts = _probe_contexts([probe], x=1, depth=None, remap=None, front_encoder=encoder)
+        (context,) = contexts
+        # front tokens [1,3,5] -> chains [[1,3,5]] -> one SAE slot of k=2 latent ids; tail [2] stays a token
+        self.assertEqual(len(context), 2)
+        self.assertTrue(all(latent_id >= 8 for latent_id in context[0]))
+        self.assertEqual(context[1], [2])
+
+
 if __name__ == "__main__":
     unittest.main()

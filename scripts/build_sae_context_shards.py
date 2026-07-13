@@ -56,6 +56,16 @@ def _encode_front(front_stream, index_map, lookup, sae, mode, window, latent_off
     return [sorted(latent_offset + latent for latent in set(row.tolist())) for row in indices]
 
 
+def sae_front_encoder(sae, mode, window, latent_offset, lookup, index_map):
+    """Returns callable(front_tokens, front_clauses) -> list of latent-id slots,
+    for use as hybrid_sweep run_sweep(front_encoder=...)."""
+    def encode(front_tokens, front_clauses):
+        stream = list(zip(front_clauses, front_tokens))
+        return _encode_front(stream, index_map, lookup, sae, mode, window, latent_offset)
+    encode.tail_lookup = lookup
+    return encode
+
+
 def sae_steps_for_story(stream, index_map, lookup, sae, mode, window, split_seed, story_id, latent_offset, force_split=None):
     if not stream:
         return []

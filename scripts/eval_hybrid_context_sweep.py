@@ -33,6 +33,9 @@ def parse_args():
     parser.add_argument("--device", default="")
     parser.add_argument("--index-map", default=None, help="old_to_new.json applied to record indices (use when the checkpoint was trained on reordered shards).")
     parser.add_argument("--cross-clause", action="store_true", help="Build probe history with cross-clause chains (match hybrid-cross training).")
+    parser.add_argument("--sae", default=None, help="sae_best.pt; enables SAE front encoding.")
+    parser.add_argument("--sae-mode", choices=["chain", "window"], default="chain")
+    parser.add_argument("--sae-window", type=int, default=4)
     return parser.parse_args()
 
 
@@ -52,6 +55,15 @@ def main():
     remap = resolve_vocab_remap(checkpoint.get("config", {}), vocab_override=args.vocab)
     if remap is not None:
         remap = remap.to("cpu")
+    front_encoder = None
+    if args.sae:
+        from scripts.build_sae_context_shards import sae_front_encoder
+        from scripts.sae import load_sae
+        from scripts.train_phrase_gpt import load_vocab_top_k_remap
+        sae = load_sae(args.sae)
+        lookup, tokens = load_vocab_top_k_remap(args.vocab, 8191)
+        front_encoder = sae_front_encoder(sae, mode=args.sae_mode, window=args.sae_window, latent_offset=len(tokens), lookup=lookup, index_map=None)
+        remap = None  # probes already index-mapped; lookup handles top-8k; latent ids must not be re-remapped
     print(f"probes={len(probes)} device={device} remap={'yes' if remap is not None else 'no'}", flush=True)
     # Compressed contexts longer than the model's sequence_len are truncated by the
     # final-layer attention window, so large D and unbounded D can coincide on long
@@ -60,7 +72,7 @@ def main():
     result = run_sweep(model, probes, x_values=_parse_int_list(args.x_values), d_values=d_values,
                        fixed_x_for_depth=args.fixed_x_for_depth, remap=remap, batch_size=args.batch_size,
                        device=device, bootstrap=args.bootstrap, bootstrap_seed=args.sweep_seed,
-                       reset_on_clause=not args.cross_clause)
+                       reset_on_clause=not args.cross_clause, front_encoder=front_encoder)
     result["split"] = args.split
     print(json.dumps(result, indent=2))
 

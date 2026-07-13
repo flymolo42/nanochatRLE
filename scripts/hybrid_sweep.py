@@ -172,22 +172,31 @@ def classic_context_steps(probe):
     return [[int(index)] for index in probe.token_indices[:probe.target_pos]]
 
 
-def _probe_contexts(probes, x, depth, remap, reset_on_clause=True):
-    return [
-        _remap_steps(context_steps_for_probe(p, x=x, depth=depth, reset_on_clause=reset_on_clause), remap)
-        for p in probes
-    ]
+def _probe_contexts(probes, x, depth, remap, reset_on_clause=True, front_encoder=None):
+    contexts = []
+    for p in probes:
+        if front_encoder is None:
+            steps = context_steps_for_probe(p, x=x, depth=depth, reset_on_clause=reset_on_clause)
+        else:
+            tail_start = max(0, p.target_pos - x)
+            front = front_encoder(p.token_indices[:tail_start], p.clause_ids[:tail_start])
+            if depth is not None:
+                front = front[-depth:]
+            tail = [[int(front_encoder.tail_lookup[p.token_indices[i]])] for i in range(tail_start, p.target_pos)]
+            steps = front + tail
+        contexts.append(_remap_steps(steps, remap))
+    return contexts
 
 
 def run_sweep(model, probes, x_values, d_values, fixed_x_for_depth, remap, batch_size, device,
-              bootstrap=0, bootstrap_seed=0, reset_on_clause=True):
+              bootstrap=0, bootstrap_seed=0, reset_on_clause=True, front_encoder=None):
     result = {"x_sweep": {}, "d_sweep": {}, "num_probes": len(probes), "reset_on_clause": reset_on_clause}
     for x in x_values:
-        contexts = _probe_contexts(probes, x=x, depth=None, remap=remap, reset_on_clause=reset_on_clause)
+        contexts = _probe_contexts(probes, x=x, depth=None, remap=remap, reset_on_clause=reset_on_clause, front_encoder=front_encoder)
         logits = predict_probe_logits(model, contexts, batch_size, device)
         result["x_sweep"][str(x)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
     for d in d_values:
-        contexts = _probe_contexts(probes, x=fixed_x_for_depth, depth=d, remap=remap, reset_on_clause=reset_on_clause)
+        contexts = _probe_contexts(probes, x=fixed_x_for_depth, depth=d, remap=remap, reset_on_clause=reset_on_clause, front_encoder=front_encoder)
         logits = predict_probe_logits(model, contexts, batch_size, device)
         result["d_sweep"][str(d)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
     contexts = [_remap_steps(classic_context_steps(p), remap) for p in probes]
