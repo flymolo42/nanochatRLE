@@ -144,6 +144,19 @@ def run_transform(records_path, vocab_path, plan_path, ils_map_path, out_dir, co
         vocab_rows = json.load(file)
     if len(vocab_rows) != plan["vocab_size_old"]:
         raise SystemExit(f"vocab size {len(vocab_rows)} != plan vocab_size_old {plan['vocab_size_old']}")
+    # Guard against feeding a vocab from a different index space than the plan
+    # (e.g. the ILS-reordered vocab, whose "index" is a post-reorder position):
+    # every plan parent's token must match the vocab row at its old_index.
+    token_by_index = {int(row["index"]): row["token"] for row in vocab_rows}
+    for parent in plan["parents"]:
+        old = int(parent["old_index"])
+        if token_by_index.get(old) != parent["token"]:
+            raise SystemExit(
+                "index-space mismatch between plan and vocab: plan parent old_index "
+                f"{old} has token {parent['token']!r} but vocab row {old} is "
+                f"{token_by_index.get(old)!r} — the plan and --vocab must both use "
+                "ORIGINAL (pre-ILS) indices"
+            )
     with open(ils_map_path, "r", encoding="utf-8") as file:
         ils_positions = json.load(file)
     if len(ils_positions) != plan["vocab_size_old"]:

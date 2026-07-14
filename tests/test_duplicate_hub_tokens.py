@@ -147,6 +147,32 @@ class RunTransformTests(unittest.TestCase):
         self.assertEqual(report["stories"], 2)
         self.assertEqual(report["late_occurrences"], 1)
 
+    def test_plan_vocab_token_mismatch_raises(self):
+        # A plan whose parent token disagrees with the vocab row at old_index means
+        # the plan and vocab are in different index spaces (e.g. plan built against
+        # the ILS vocab) -> must fail loudly instead of transforming garbage.
+        vocab = [{"token": f"tok{i}", "index": i, "count": 10 + i, "avg_position": 0.5} for i in range(6)]
+        records = [_single(0, 0, 5, token_pos=0)]
+        plan = _plan(6, [2])
+        plan["parents"][0]["token"] = "not-tok2"  # deliberate disagreement with vocab row 2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "vocab.json").write_text(json.dumps(vocab), encoding="utf-8")
+            (tmp / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+            (tmp / "ils_map.json").write_text(json.dumps(_IDENTITY_ILS), encoding="utf-8")
+            with gzip.open(tmp / "records.jsonl.gz", "wt", encoding="utf-8") as file:
+                for record in records:
+                    file.write(json.dumps(record) + "\n")
+            with self.assertRaises(SystemExit) as ctx:
+                run_transform(
+                    tmp / "records.jsonl.gz", tmp / "vocab.json", tmp / "plan.json",
+                    tmp / "ils_map.json", tmp / "out",
+                )
+        message = str(ctx.exception)
+        self.assertIn("index-space mismatch between plan and vocab", message)
+        self.assertIn("not-tok2", message)  # names the first offender
+        self.assertIn("tok2", message)
+
 
 if __name__ == "__main__":
     unittest.main()
