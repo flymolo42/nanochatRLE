@@ -6,15 +6,16 @@ cd "$(dirname "$0")/.."
 echo "=== 1. plan duplicates (minutes) ==="
 uv run python -m scripts.plan_token_duplicates \
     --pair-counts phrase_quote_split_ils_out/pair_counts.npz \
-    --vocab phrase_quote_split_ils_out/vocab.json \
+    --vocab phrase_quote_split_out/vocab.json \
     --num-duplicates 100 \
     --out phrase_dup100_out/duplicates_plan.json
 
 echo "=== 2. transform records (~3h) ==="
 uv run python -m scripts.duplicate_hub_tokens \
     --records phrase_quote_split_out/phrase_index.jsonl.gz \
-    --vocab phrase_quote_split_ils_out/vocab.json \
+    --vocab phrase_quote_split_out/vocab.json \
     --plan phrase_dup100_out/duplicates_plan.json \
+    --ils-map phrase_quote_split_ils_out/old_to_new.json \
     --out-dir phrase_dup100_out
 
 echo "=== 3. reorder + ILS (~1.5h) ==="

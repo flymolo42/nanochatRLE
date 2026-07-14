@@ -2,17 +2,22 @@
 Rewrite phrase records so high-conflict hub tokens split into early/late copies.
 
 Assignment (per spec): an occurrence goes to the LATE copy iff its predecessor
-in the story's canonical stream has an OLD index greater than the token's own
-OLD index (it would break a chain under the current order); first-in-story and
-ascending-context occurrences keep the parent (early) slot. All record
-representations of the same absolute token position are rewritten consistently,
-and every index is renumbered into the extended vocab space.
+in the story's canonical stream has a CURRENT-ORDER position (i.e. its ILS
+position, from phrase_quote_split_ils_out/old_to_new.json) greater than the
+token's own current-order position (it would break a chain under the current
+order); first-in-story and ascending-context occurrences keep the parent
+(early) slot. Records and the pair-counts plan live in ORIGINAL (pre-ILS)
+vocab id space throughout; only the assignment comparison itself looks up
+ILS positions. All record representations of the same absolute token position
+are rewritten consistently, and every index is renumbered into the extended
+vocab space.
 
 Example:
 python -m scripts.duplicate_hub_tokens \
     --records phrase_quote_split_out/phrase_index.jsonl.gz \
-    --vocab phrase_quote_split_ils_out/vocab.json \
+    --vocab phrase_quote_split_out/vocab.json \
     --plan duplication_out/duplicates_plan.json \
+    --ils-map phrase_quote_split_ils_out/old_to_new.json \
     --out-dir phrase_dup100_out
 """
 
@@ -38,7 +43,7 @@ def _element_positions(record):
         yield slot, start + slot
 
 
-def transform_story(story_records, renumber, parent_set, late_of, stats):
+def transform_story(story_records, renumber, parent_set, late_of, ils_positions, stats):
     positions = {}
     for record in story_records:
         if record.get("record_type") != "single" or record.get("label") != "punctuation" or not record.get("indices"):
@@ -51,7 +56,7 @@ def transform_story(story_records, renumber, parent_set, late_of, stats):
     for position in sorted(positions):
         old = positions[position]
         if old in parent_set:
-            if previous is not None and previous > old:
+            if previous is not None and ils_positions[previous] > ils_positions[old]:
                 late_positions.add(position)
                 stats["late"] += 1
             else:
@@ -77,7 +82,7 @@ def transform_story(story_records, renumber, parent_set, late_of, stats):
     return out
 
 
-def duplicate_records(records, plan, stats=None, progress_every=0):
+def duplicate_records(records, plan, ils_positions, stats=None, progress_every=0):
     stats = stats if stats is not None else {"stories": 0, "early": 0, "late": 0}
     parents = [p["old_index"] for p in plan["parents"]]
     parent_set = set(parents)
@@ -91,7 +96,7 @@ def duplicate_records(records, plan, stats=None, progress_every=0):
         stats["stories"] += 1
         if progress_every > 0 and stats["stories"] % progress_every == 0:
             print(f"duplicated {stats['stories']} stories (early={stats['early']} late={stats['late']})", flush=True)
-        yield from transform_story(story_records, renumber, parent_set, late_of, stats)
+        yield from transform_story(story_records, renumber, parent_set, late_of, ils_positions, stats)
 
     for record in records:
         key = (record["split"], int(record["story_id"]))
@@ -131,7 +136,7 @@ def _extended_vocab(vocab_rows, plan, early_counts, late_counts):
     return sorted(new_rows, key=lambda r: r["index"])
 
 
-def run_transform(records_path, vocab_path, plan_path, out_dir, compresslevel=4, progress_every=100000):
+def run_transform(records_path, vocab_path, plan_path, ils_map_path, out_dir, compresslevel=4, progress_every=100000):
     started_at = time.time()
     with open(plan_path, "r", encoding="utf-8") as file:
         plan = json.load(file)
@@ -139,6 +144,10 @@ def run_transform(records_path, vocab_path, plan_path, out_dir, compresslevel=4,
         vocab_rows = json.load(file)
     if len(vocab_rows) != plan["vocab_size_old"]:
         raise SystemExit(f"vocab size {len(vocab_rows)} != plan vocab_size_old {plan['vocab_size_old']}")
+    with open(ils_map_path, "r", encoding="utf-8") as file:
+        ils_positions = json.load(file)
+    if len(ils_positions) != plan["vocab_size_old"]:
+        raise SystemExit(f"ils map size {len(ils_positions)} != plan vocab_size_old {plan['vocab_size_old']}")
 
     os.makedirs(out_dir, exist_ok=True)
     out_dir = Path(out_dir)
@@ -171,7 +180,9 @@ def run_transform(records_path, vocab_path, plan_path, out_dir, compresslevel=4,
 
     out_records = out_dir / "phrase_index.jsonl.gz"
     with gzip.open(out_records, "wt", encoding="utf-8", compresslevel=compresslevel) as file:
-        for record in tallying(duplicate_records(iter_records(records_path), plan, stats=stats, progress_every=progress_every)):
+        for record in tallying(duplicate_records(
+            iter_records(records_path), plan, ils_positions, stats=stats, progress_every=progress_every
+        )):
             file.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
             file.write("\n")
 
@@ -205,6 +216,8 @@ def parse_args():
     parser.add_argument("--records", required=True)
     parser.add_argument("--vocab", required=True)
     parser.add_argument("--plan", required=True)
+    parser.add_argument("--ils-map", required=True,
+                         help="old_to_new.json (list: original id -> current/ILS-order position)")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--compresslevel", type=int, default=4)
     parser.add_argument("--progress-every", type=int, default=100000)
@@ -213,7 +226,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    report = run_transform(args.records, args.vocab, args.plan, args.out_dir,
+    report = run_transform(args.records, args.vocab, args.plan, args.ils_map, args.out_dir,
                            compresslevel=args.compresslevel, progress_every=args.progress_every)
     print(json.dumps(report, indent=2))
 
