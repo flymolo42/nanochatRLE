@@ -20,19 +20,30 @@ from scripts.reorder_phrase_vocab import story_index_streams
 from scripts.train_phrase_vectors import iter_records
 
 
-def chain_length_histogram(stream, mapping, reset_on_clause, histogram=None):
+def chain_length_histogram(stream, mapping, reset_on_clause, histogram=None, max_chain_len=None):
     histogram = histogram if histogram is not None else {}
+
+    def record_run(length):
+        if max_chain_len is None or length <= max_chain_len:
+            histogram[length] = histogram.get(length, 0) + 1
+            return
+        num_chunks = -(-length // max_chain_len)
+        base, remainder = divmod(length, num_chunks)
+        for chunk_index in range(num_chunks):
+            size = base + (1 if chunk_index < remainder else 0)
+            histogram[size] = histogram.get(size, 0) + 1
+
     run = 0
     prev_clause = prev_index = None
     for clause, raw_index in stream:
         index = int(mapping[raw_index]) if mapping is not None else raw_index
         if run and (index <= prev_index or (reset_on_clause and clause != prev_clause)):
-            histogram[run] = histogram.get(run, 0) + 1
+            record_run(run)
             run = 0
         run += 1
         prev_clause, prev_index = clause, index
     if run:
-        histogram[run] = histogram.get(run, 0) + 1
+        record_run(run)
     return histogram
 
 
@@ -50,7 +61,7 @@ def summarize(histogram):
     }
 
 
-def measure(records, mappings, reset_on_clause, max_records=None):
+def measure(records, mappings, reset_on_clause, max_records=None, max_chain_len=None):
     if max_records is not None:
         records = itertools.islice(records, max_records)
     histograms = {name: {} for name in mappings}
@@ -58,7 +69,7 @@ def measure(records, mappings, reset_on_clause, max_records=None):
     for _, _, stream in story_index_streams(records):
         stories += 1
         for name, mapping in mappings.items():
-            chain_length_histogram(stream, mapping, reset_on_clause, histogram=histograms[name])
+            chain_length_histogram(stream, mapping, reset_on_clause, histogram=histograms[name], max_chain_len=max_chain_len)
     result = {"stories": stories, "reset_on_clause": reset_on_clause}
     for name, histogram in histograms.items():
         result[name] = summarize(histogram)
@@ -72,6 +83,7 @@ def parse_args():
                         help="Named old_to_new.json map; repeatable. Omit to measure record indices as-is.")
     parser.add_argument("--no-clause-reset", action="store_true", help="Let chains continue across clause boundaries.")
     parser.add_argument("--max-records", type=int, default=None)
+    parser.add_argument("--max-chain-len", type=int, default=None)
     return parser.parse_args()
 
 
@@ -89,6 +101,7 @@ def main():
         mappings,
         reset_on_clause=not args.no_clause_reset,
         max_records=args.max_records,
+        max_chain_len=args.max_chain_len,
     )
     print(json.dumps(result, indent=2))
 

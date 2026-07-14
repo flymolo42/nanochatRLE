@@ -30,7 +30,7 @@ class PairedDeltaTests(unittest.TestCase):
         buckets = paired_deltas(records)
         self.assertEqual(buckets["3"]["count"], 2)
         self.assertAlmostEqual(buckets["3"]["delta_top1"], 0.5)   # intact better by 0.5
-        self.assertAlmostEqual(buckets["3"]["delta_ce"], -1.0)    # intact lower CE by 1.0
+        self.assertAlmostEqual(buckets["3"]["delta_ce"], -0.5)    # mean of -1.0 and 0.0
         self.assertAlmostEqual(buckets["5"]["delta_top1"], -1.0)  # split better
         self.assertIn("all", buckets)
         self.assertEqual(buckets["all"]["count"], 3)

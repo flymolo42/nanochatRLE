@@ -63,14 +63,14 @@ def build_sweep_probes(records, min_history=1, max_probes=None, split=None, inde
     return probes
 
 
-def context_steps_for_probe(probe, x, depth, reset_on_clause=True):
+def context_steps_for_probe(probe, x, depth, reset_on_clause=True, max_chain_len=None):
     p = probe.target_pos
     tail_start = max(0, p - x)
     front_records = [
         {"indices": [probe.token_indices[i]], "phrase_id": probe.clause_ids[i]}
         for i in range(tail_start)
     ]
-    front_chains = _chains_from_token_records(front_records, reset_on_clause=reset_on_clause)
+    front_chains = _chains_from_token_records(front_records, reset_on_clause=reset_on_clause, max_chain_len=max_chain_len)
     if depth is not None:
         front_chains = front_chains[-depth:]
     tail = [[probe.token_indices[i]] for i in range(tail_start, p)]
@@ -172,11 +172,11 @@ def classic_context_steps(probe):
     return [[int(index)] for index in probe.token_indices[:probe.target_pos]]
 
 
-def _probe_contexts(probes, x, depth, remap, reset_on_clause=True, front_encoder=None):
+def _probe_contexts(probes, x, depth, remap, reset_on_clause=True, front_encoder=None, max_chain_len=None):
     contexts = []
     for p in probes:
         if front_encoder is None:
-            steps = context_steps_for_probe(p, x=x, depth=depth, reset_on_clause=reset_on_clause)
+            steps = context_steps_for_probe(p, x=x, depth=depth, reset_on_clause=reset_on_clause, max_chain_len=max_chain_len)
             contexts.append(_remap_steps(steps, remap))
         else:
             # front_encoder output is SAE latent ids (>= latent_offset) that live
@@ -196,14 +196,14 @@ def _probe_contexts(probes, x, depth, remap, reset_on_clause=True, front_encoder
 
 
 def run_sweep(model, probes, x_values, d_values, fixed_x_for_depth, remap, batch_size, device,
-              bootstrap=0, bootstrap_seed=0, reset_on_clause=True, front_encoder=None):
+              bootstrap=0, bootstrap_seed=0, reset_on_clause=True, front_encoder=None, max_chain_len=None):
     result = {"x_sweep": {}, "d_sweep": {}, "num_probes": len(probes), "reset_on_clause": reset_on_clause}
     for x in x_values:
-        contexts = _probe_contexts(probes, x=x, depth=None, remap=remap, reset_on_clause=reset_on_clause, front_encoder=front_encoder)
+        contexts = _probe_contexts(probes, x=x, depth=None, remap=remap, reset_on_clause=reset_on_clause, front_encoder=front_encoder, max_chain_len=max_chain_len)
         logits = predict_probe_logits(model, contexts, batch_size, device)
         result["x_sweep"][str(x)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
     for d in d_values:
-        contexts = _probe_contexts(probes, x=fixed_x_for_depth, depth=d, remap=remap, reset_on_clause=reset_on_clause, front_encoder=front_encoder)
+        contexts = _probe_contexts(probes, x=fixed_x_for_depth, depth=d, remap=remap, reset_on_clause=reset_on_clause, front_encoder=front_encoder, max_chain_len=max_chain_len)
         logits = predict_probe_logits(model, contexts, batch_size, device)
         result["d_sweep"][str(d)] = _aggregate(probes, logits, remap, bootstrap=bootstrap, bootstrap_seed=bootstrap_seed)
     contexts = [_remap_steps(classic_context_steps(p), remap) for p in probes]

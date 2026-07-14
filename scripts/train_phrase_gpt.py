@@ -132,7 +132,27 @@ def _token_steps(records):
     ]
 
 
-def _chains_from_token_records(token_records, reset_on_clause):
+def _cap_chains(chains, max_chain_len):
+    """Split chains longer than max_chain_len into balanced contiguous chunks
+    (contiguous pieces of an ascending run stay ascending). None = no cap."""
+    if max_chain_len is None:
+        return chains
+    capped = []
+    for chain in chains:
+        if len(chain) <= max_chain_len:
+            capped.append(chain)
+            continue
+        num_chunks = -(-len(chain) // max_chain_len)
+        base, remainder = divmod(len(chain), num_chunks)
+        start = 0
+        for chunk_index in range(num_chunks):
+            size = base + (1 if chunk_index < remainder else 0)
+            capped.append(chain[start:start + size])
+            start += size
+    return capped
+
+
+def _chains_from_token_records(token_records, reset_on_clause, max_chain_len=None):
     chains = []
     current = []
     current_clause = None
@@ -148,16 +168,16 @@ def _chains_from_token_records(token_records, reset_on_clause):
         current_clause = clause
     if current:
         chains.append(current)
-    return chains
+    return _cap_chains(chains, max_chain_len)
 
 
 def _steps_from_chains(chains):
     return [(chains[position], chains[position + 1][0]) for position in range(len(chains) - 1)]
 
 
-def _chain_steps(records, reset_on_clause):
+def _chain_steps(records, reset_on_clause, max_chain_len=None):
     token_records = _canonical_token_stream(records)
-    return _steps_from_chains(_chains_from_token_records(token_records, reset_on_clause))
+    return _steps_from_chains(_chains_from_token_records(token_records, reset_on_clause, max_chain_len=max_chain_len))
 
 
 def _phrase_boundary_positions(token_records):
@@ -172,10 +192,10 @@ def _phrase_boundary_positions(token_records):
     return sorted(set(boundaries))
 
 
-def _hybrid_steps_at_split(token_records, split, reset_on_clause=True):
+def _hybrid_steps_at_split(token_records, split, reset_on_clause=True, max_chain_len=None):
     front = token_records[:split]
     back = token_records[split:]
-    chains = _chains_from_token_records(front, reset_on_clause=reset_on_clause)
+    chains = _chains_from_token_records(front, reset_on_clause=reset_on_clause, max_chain_len=max_chain_len)
     # each back token becomes its own length-1 chain (1-hot); extend with one-element lists
     chains.extend([int(record["indices"][0])] for record in back if record.get("indices"))
     return _steps_from_chains(chains)
@@ -185,14 +205,14 @@ def _choose_split(boundaries, seed, story_id):
     return random.Random(seed * 1_000_003 + int(story_id)).choice(boundaries)
 
 
-def _hybrid_steps(records, seed, reset_on_clause=True):
+def _hybrid_steps(records, seed, reset_on_clause=True, max_chain_len=None):
     token_records = _canonical_token_stream(records)
     if not token_records:
         return []
     story_id = int(token_records[0].get("story_id", 0))
     boundaries = _phrase_boundary_positions(token_records)
     split = _choose_split(boundaries, seed, story_id)
-    return _hybrid_steps_at_split(token_records, split, reset_on_clause=reset_on_clause)
+    return _hybrid_steps_at_split(token_records, split, reset_on_clause=reset_on_clause, max_chain_len=max_chain_len)
 
 
 def _chunk_steps_into_examples(steps, sequence_len):
@@ -208,18 +228,18 @@ def _chunk_steps_into_examples(steps, sequence_len):
 
 
 CHAIN_MODE_BUILDERS = {
-    "token": lambda records, seed: _token_steps(records),
-    "phrase": lambda records, seed: _chain_steps(records, reset_on_clause=True),
-    "cross-phrase": lambda records, seed: _chain_steps(records, reset_on_clause=False),
-    "hybrid": lambda records, seed: _hybrid_steps(records, seed),
-    "hybrid-cross": lambda records, seed: _hybrid_steps(records, seed, reset_on_clause=False),
+    "token": lambda records, seed, max_chain_len: _token_steps(records),
+    "phrase": lambda records, seed, max_chain_len: _chain_steps(records, reset_on_clause=True, max_chain_len=max_chain_len),
+    "cross-phrase": lambda records, seed, max_chain_len: _chain_steps(records, reset_on_clause=False, max_chain_len=max_chain_len),
+    "hybrid": lambda records, seed, max_chain_len: _hybrid_steps(records, seed, max_chain_len=max_chain_len),
+    "hybrid-cross": lambda records, seed, max_chain_len: _hybrid_steps(records, seed, reset_on_clause=False, max_chain_len=max_chain_len),
 }
 
 
-def examples_from_story_records(records, sequence_len, chain_mode="token", seed=0):
+def examples_from_story_records(records, sequence_len, chain_mode="token", seed=0, max_chain_len=None):
     if chain_mode not in CHAIN_MODE_BUILDERS:
         raise ValueError(f"Unknown chain_mode {chain_mode!r}; expected one of {sorted(CHAIN_MODE_BUILDERS)}")
-    return _chunk_steps_into_examples(CHAIN_MODE_BUILDERS[chain_mode](records, seed), sequence_len)
+    return _chunk_steps_into_examples(CHAIN_MODE_BUILDERS[chain_mode](records, seed, max_chain_len), sequence_len)
 
 
 def _examples_from_story_records(records, sequence_len):

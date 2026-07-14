@@ -36,10 +36,10 @@ def remap_record_indices(record, index_map):
     return remapped
 
 
-def _flush_story(current_rows, sequence_len, chain_mode, split_seed):
+def _flush_story(current_rows, sequence_len, chain_mode, split_seed, max_chain_len=None):
     if not current_rows:
         return []
-    return examples_from_story_records(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, seed=split_seed)
+    return examples_from_story_records(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, seed=split_seed, max_chain_len=max_chain_len)
 
 
 def _write_shard(out_dir, shard_index, examples, sequence_len, split):
@@ -58,7 +58,7 @@ def _write_shard(out_dir, shard_index, examples, sequence_len, split):
     }
 
 
-def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token", split_seed=0, index_map=None, validation_records=None):
+def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard, records_path="", vocab_path="", progress_every=100000, max_examples=None, chain_mode="token", split_seed=0, index_map=None, validation_records=None, max_chain_len=None):
     os.makedirs(out_dir, exist_ok=True)
     started_at = time.time()
     current_key = None
@@ -101,7 +101,7 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
                 key = (record["split"], int(record["story_id"]))
                 if current_key is not None and key != current_key:
                     stories_seen += 1
-                    if not add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed)):
+                    if not add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed, max_chain_len=max_chain_len)):
                         current_rows = []
                         break
                     if progress_every > 0 and stories_seen % progress_every == 0:
@@ -113,7 +113,7 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
                 break
         if current_rows and not limit_reached():
             stories_seen += 1
-            add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed))
+            add_examples(current_key[0], _flush_story(current_rows, sequence_len=sequence_len, chain_mode=chain_mode, split_seed=split_seed, max_chain_len=max_chain_len))
         current_key = None
         current_rows = []
 
@@ -137,6 +137,7 @@ def build_shards_from_records(records, out_dir, sequence_len, examples_per_shard
         "sequence_len": sequence_len,
         "chain_mode": chain_mode,
         "split_seed": split_seed,
+        "max_chain_len": max_chain_len,
         "examples_per_shard": examples_per_shard,
         "num_shards": len(shards),
         "num_examples": sum(shard["num_examples"] for shard in shards),
@@ -172,6 +173,7 @@ def parse_args():
     parser.add_argument("--chain-mode", choices=["token", "phrase", "cross-phrase", "hybrid", "hybrid-cross"], default="token", help="Per-timestep input construction. hybrid = compressed phrase history + a recent 1-hot token tail, split at a random phrase boundary per story. hybrid-cross = hybrid whose history chains continue across clause boundaries while ascending.")
     parser.add_argument("--split-seed", type=int, default=0, help="Seed for the hybrid random split point (per-story split = split_seed*1000003 + story_id). Ignored for non-hybrid modes.")
     parser.add_argument("--index-map", default=None, help="Path to old_to_new.json from scripts.reorder_phrase_vocab; remaps record indices on the fly. Pass the matching reordered vocab via --vocab.")
+    parser.add_argument("--max-chain-len", type=int, default=None, help="Split ascending chains longer than this into balanced chunks (epistemic cap; 9 keeps all slots at measured lengths).")
     parser.add_argument("--validation-records", default=None, help="Separate validation records file, sharded in full regardless of --limit-examples (use with limited builds so a true validation split is still present).")
     return parser.parse_args()
 
@@ -199,6 +201,7 @@ def main():
         split_seed=args.split_seed,
         index_map=index_map,
         validation_records=iter_records(args.validation_records) if args.validation_records else None,
+        max_chain_len=args.max_chain_len,
     )
     print(json.dumps(manifest, indent=2))
 
