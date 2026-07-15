@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument("--sweep-seed", type=int, default=0, help="Seed for bootstrap CIs.")
     parser.add_argument("--device", default="")
     parser.add_argument("--index-map", default=None, help="old_to_new.json applied to record indices (use when the checkpoint was trained on reordered shards).")
+    parser.add_argument("--max-chain-len", type=int, default=None, help="Cap front chains to match capped training shards.")
     parser.add_argument("--cross-clause", action="store_true", help="Build probe history with cross-clause chains (match hybrid-cross training).")
     parser.add_argument("--sae", default=None, help="sae_best.pt; enables SAE front encoding.")
     parser.add_argument("--sae-mode", choices=["chain", "window"], default="chain")

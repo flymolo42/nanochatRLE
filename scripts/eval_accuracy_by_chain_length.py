@@ -61,6 +61,7 @@ def parse_args():
     parser.add_argument("--split", default=None)
     parser.add_argument("--max-probes", type=int, default=20000)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--max-chain-len", type=int, default=None)
     parser.add_argument("--device", default="")
     return parser.parse_args()
 
@@ -81,7 +82,7 @@ def main():
     remap = resolve_vocab_remap(checkpoint.get("config", {}), vocab_override=args.vocab)
     if remap is not None:
         remap = remap.to("cpu")
-    contexts = _probe_contexts(probes, x=0, depth=None, remap=remap, reset_on_clause=False)
+    contexts = _probe_contexts(probes, x=0, depth=None, remap=remap, reset_on_clause=False, max_chain_len=args.max_chain_len)
     logits = predict_probe_logits(model, contexts, args.batch_size, device)
     targets = [
         int(remap[probe.token_indices[probe.target_pos]]) if remap is not None
