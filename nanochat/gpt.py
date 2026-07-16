@@ -37,6 +37,9 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    # Optional sparse phrase-vector input vocabulary. When >0, GPT.forward can
+    # add summed phrase embeddings into selected token positions.
+    phrase_vocab_size: int = 0
 
 
 def norm(x):
@@ -172,6 +175,8 @@ class GPT(nn.Module):
             "wte": nn.Embedding(padded_vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
         })
+        self.phrase_wte = nn.Embedding(config.phrase_vocab_size, config.n_embd) if config.phrase_vocab_size > 0 else None
+        self.phrase_lambda = nn.Parameter(torch.ones(1)) if config.phrase_vocab_size > 0 else None
         self.lm_head = Linear(config.n_embd, padded_vocab_size, bias=False)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
         # resid_lambdas: scales the residual stream at each layer (init 1.0 = neutral)
@@ -216,6 +221,9 @@ class GPT(nn.Module):
 
         # Embedding and unembedding
         torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=0.8)
+        if self.phrase_wte is not None:
+            torch.nn.init.normal_(self.phrase_wte.weight, mean=0.0, std=0.8)
+            torch.nn.init.ones_(self.phrase_lambda)
         torch.nn.init.normal_(self.lm_head.weight, mean=0.0, std=0.001)
 
         # Transformer blocks: uniform init with bound = sqrt(3) * std (same standard deviation as normal)
@@ -262,6 +270,8 @@ class GPT(nn.Module):
         # because GradScaler cannot unscale fp16 gradients.
         if COMPUTE_DTYPE != torch.float16:
             self.transformer.wte.to(dtype=COMPUTE_DTYPE)
+            if self.phrase_wte is not None:
+                self.phrase_wte.to(dtype=COMPUTE_DTYPE)
             for ve in self.value_embeds.values():
                 ve.to(dtype=COMPUTE_DTYPE)
 
@@ -329,7 +339,9 @@ class GPT(nn.Module):
         nparams = sum(p.numel() for p in self.parameters())
         # Exclude non-matmul params: embeddings and per-layer scalars
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
+        phrase_numel = 0 if self.phrase_wte is None else self.phrase_wte.weight.numel() + self.phrase_lambda.numel()
         nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
+                          phrase_numel +
                           self.resid_lambdas.numel() + self.x0_lambdas.numel() +
                           self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel())
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
@@ -356,14 +368,17 @@ class GPT(nn.Module):
         """
         # Count each group separately (mirrors the grouping in setup_optimizers)
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
+        phrase_wte = 0 if self.phrase_wte is None else sum(p.numel() for p in self.phrase_wte.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
         lm_head = sum(p.numel() for p in self.lm_head.parameters())
         transformer_matrices = sum(p.numel() for p in self.transformer.h.parameters())
-        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel()
-        total = wte + value_embeds + lm_head + transformer_matrices + scalars
+        phrase_scalars = 0 if self.phrase_lambda is None else self.phrase_lambda.numel()
+        scalars = self.resid_lambdas.numel() + self.x0_lambdas.numel() + self.smear_gate.weight.numel() + self.smear_lambda.numel() + self.backout_lambda.numel() + phrase_scalars
+        total = wte + phrase_wte + value_embeds + lm_head + transformer_matrices + scalars
         assert total == sum(p.numel() for p in self.parameters()), "Parameter count mismatch"
         return {
             'wte': wte,
+            'phrase_wte': phrase_wte,
             'value_embeds': value_embeds,
             'lm_head': lm_head,
             'transformer_matrices': transformer_matrices,
@@ -379,11 +394,13 @@ class GPT(nn.Module):
         matrix_params = list(self.transformer.h.parameters())
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
+        phrase_embedding_params = [] if self.phrase_wte is None else list(self.phrase_wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
-        smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
+        phrase_scalar_params = [] if self.phrase_lambda is None else [self.phrase_lambda]
+        smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda] + phrase_scalar_params
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(phrase_embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -394,6 +411,7 @@ class GPT(nn.Module):
             # AdamW groups (embeddings, lm_head, scalars)
             dict(kind='adamw', params=lm_head_params, lr=unembedding_lr * dmodel_lr_scale, betas=(0.8, 0.96), eps=1e-10, weight_decay=0.01),
             dict(kind='adamw', params=embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.001),
+            dict(kind='adamw', params=phrase_embedding_params, lr=embedding_lr * dmodel_lr_scale, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.001),
             dict(kind='adamw', params=value_embeds_params, lr=embedding_lr * dmodel_lr_scale * 0.5, betas=(0.8, 0.995), eps=1e-10, weight_decay=0.01),
             dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.05),
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
@@ -413,7 +431,41 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def _encode_phrase_inputs(self, B, T, phrase_indices, phrase_offsets, phrase_batch_positions, dtype, device):
+        if phrase_indices is None:
+            return None
+        if self.phrase_wte is None:
+            raise ValueError("GPTConfig.phrase_vocab_size must be > 0 to pass phrase inputs")
+        if phrase_offsets is None or phrase_batch_positions is None:
+            raise ValueError("phrase_offsets and phrase_batch_positions are required with phrase_indices")
+        if phrase_offsets.numel() != phrase_batch_positions.size(0):
+            raise ValueError("phrase_offsets length must match phrase_batch_positions rows")
+        if phrase_offsets.numel() == 0:
+            return torch.zeros((B, T, self.config.n_embd), dtype=dtype, device=device)
+
+        phrase_indices = phrase_indices.to(device=device, dtype=torch.long)
+        phrase_offsets = phrase_offsets.to(device=device, dtype=torch.long)
+        phrase_batch_positions = phrase_batch_positions.to(device=device, dtype=torch.long)
+        ends = torch.cat([phrase_offsets[1:], torch.tensor([phrase_indices.numel()], dtype=torch.long, device=device)])
+        lengths = ends - phrase_offsets
+        if torch.any(lengths <= 0):
+            raise ValueError("Each phrase vector must have at least one active index")
+
+        active_embeddings = self.phrase_wte(phrase_indices).to(dtype)
+        phrase_ids = torch.repeat_interleave(torch.arange(phrase_offsets.numel(), device=device), lengths)
+        phrase_embeddings = torch.zeros((phrase_offsets.numel(), self.config.n_embd), dtype=dtype, device=device)
+        phrase_embeddings.index_add_(0, phrase_ids, active_embeddings)
+        phrase_embeddings = norm(phrase_embeddings)
+
+        phrase_x = torch.zeros((B, T, self.config.n_embd), dtype=dtype, device=device)
+        batch_ids = phrase_batch_positions[:, 0]
+        time_ids = phrase_batch_positions[:, 1]
+        if torch.any(batch_ids < 0) or torch.any(batch_ids >= B) or torch.any(time_ids < 0) or torch.any(time_ids >= T):
+            raise ValueError("phrase_batch_positions contains an out-of-range batch or time index")
+        phrase_x.index_put_((batch_ids, time_ids), phrase_embeddings, accumulate=True)
+        return self.phrase_lambda.to(dtype) * phrase_x
+
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', phrase_indices=None, phrase_offsets=None, phrase_batch_positions=None):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -428,6 +480,9 @@ class GPT(nn.Module):
         x = self.transformer.wte(idx) # embed current token
         x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
         x = norm(x)
+        phrase_x = self._encode_phrase_inputs(B, T, phrase_indices, phrase_offsets, phrase_batch_positions, x.dtype, x.device)
+        if phrase_x is not None:
+            x = norm(x + phrase_x)
 
         # Smear: mix previous token's embedding into current position (cheap bigram info)
         if kv_cache is None:
