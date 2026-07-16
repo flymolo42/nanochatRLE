@@ -31,5 +31,26 @@ class RunArmTests(unittest.TestCase):
         self.assertEqual(result["extra_slots"], 1)  # token 0 -> 2 copies = +1 slot
 
 
+import numpy as np
+from scripts.run_kway_experiment import run_arm
+from scripts.plan_kway_duplicates import build_plan
+
+
+class PredrankArmTests(unittest.TestCase):
+    def test_run_arm_uses_predrank_apply_when_reference_given(self):
+        streams = [[(i, 0), (i, 1), (i, 0)] for i in range(8)]
+        hist = np.zeros((2, 20), dtype=np.int64)
+        hist[0, 1] = 20
+        hist[0, 18] = 20
+        plan = build_plan([0], hist, vocab_size=2, k_max=6)
+        reference = np.array([0, 1])
+        result = run_arm("kway_predrank", lambda: iter(streams), lambda: iter(streams[:2]),
+                         vocab_size=2, plan=plan, out_dir=None, max_passes=5,
+                         ils_restarts=1, ils_generations=1, jobs=1, max_chain_len=9,
+                         reference_positions=reference)
+        self.assertEqual(result["arm"], "kway_predrank")
+        self.assertGreater(result["validation_chains"]["chains"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
