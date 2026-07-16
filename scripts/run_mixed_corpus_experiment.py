@@ -57,12 +57,31 @@ def _both_fn(prose_fn, code_fn):
     return lambda: itertools.chain(prose_fn(), code_fn())
 
 
+def every_nth(base_fn, keep_every):
+    """Deterministic subsample: yield every keep_every-th stream from base_fn.
+    Returns a fresh-iterator factory, so it re-yields the same subset per call."""
+    def factory():
+        for index, item in enumerate(base_fn()):
+            if index % keep_every == 0:
+                yield item
+    return factory
+
+
 def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, vocab_size,
-                   top_n, k_max, max_passes, ils_restarts, ils_generations, jobs, max_chain_len):
+                   top_n, k_max, max_passes, ils_restarts, ils_generations, jobs, max_chain_len,
+                   balance_pairs=False):
     kw = dict(max_passes=max_passes, ils_restarts=ils_restarts, ils_generations=ils_generations, jobs=jobs)
+    # bespoke orders always use the FULL per-corpus streams
     prose_pos, prose_asc, prose_pairs = order_from(prose_train_fn, vocab_size, **kw)
     code_pos, code_asc, code_pairs = order_from(code_train_fn, vocab_size, **kw)
-    both_train_fn = _both_fn(prose_train_fn, code_train_fn)
+    # for the mixed/kway arms, optionally thin the majority corpus toward pair parity
+    mixed_prose_fn = prose_train_fn
+    balance = None
+    if balance_pairs and code_pairs > 0:
+        keep_every = max(1, round(prose_pairs / code_pairs))
+        mixed_prose_fn = every_nth(prose_train_fn, keep_every)
+        balance = {"prose_keep_every": keep_every, "unbalanced_prose_pairs": prose_pairs, "code_pairs": code_pairs}
+    both_train_fn = _both_fn(mixed_prose_fn, code_train_fn)
     mixed_pos, mixed_asc, mixed_pairs = order_from(both_train_fn, vocab_size, **kw)
 
     # k-way plan from the union pair counts + union position histograms
@@ -90,6 +109,8 @@ def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, v
         "pairs": {"prose": prose_pairs, "code": code_pairs, "mixed": mixed_pairs, "mixed_kway": int(kstats["total_pairs"])},
         "kway_extra_slots": new_vocab_size - vocab_size,
     }
+    if balance is not None:
+        report["balance"] = balance
     for domain, bespoke_pos, eval_fn in (("prose", prose_pos, prose_eval_fn), ("code", code_pos, code_eval_fn)):
         report[domain] = {
             "bespoke": measure_domain(eval_fn, bespoke_pos, max_chain_len),
@@ -123,6 +144,7 @@ def parse_args():
     parser.add_argument("--ils-generations", type=int, default=4)
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--max-chain-len", type=int, default=9)
+    parser.add_argument("--balance-pairs", action="store_true", help="Thin the majority corpus toward pair parity with the minority for the mixed/kway arms (controls the size confound).")
     parser.add_argument("--seed", type=int, default=7)
     return parser.parse_args()
 
@@ -180,7 +202,8 @@ def main():
 
     report = run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, vocab_size,
                             args.top_n, args.k_max, args.max_passes, args.ils_restarts,
-                            args.ils_generations, args.jobs, args.max_chain_len)
+                            args.ils_generations, args.jobs, args.max_chain_len,
+                            balance_pairs=args.balance_pairs)
     report["prose_train_books"] = len(prose_train)
     report["code_train_files"] = len(code_records) - cut
     report["elapsed_seconds"] = round(time.time() - started, 1)
