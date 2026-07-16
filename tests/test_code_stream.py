@@ -53,6 +53,48 @@ class TokenizeCodeTests(unittest.TestCase):
         self.assertEqual(tokens, ["a", "b"])
 
 
+class RegexLiteralTests(unittest.TestCase):
+    def test_regex_after_assignment_collapses_to_str(self):
+        tokens = [t for _, t in tokenize_code("const re = /ab+c/;")]
+        self.assertEqual(tokens, ["const", "re", "=", "<str>", ";"])
+
+    def test_regex_as_method_argument(self):
+        tokens = [t for _, t in tokenize_code("s.replace(/\\s+/g, '')")]
+        self.assertEqual(tokens, ["s", ".", "replace", "(", "<str>", ",", "<str>", ")"])
+
+    def test_regex_after_return_keyword(self):
+        tokens = [t for _, t in tokenize_code("return /x/;")]
+        self.assertEqual(tokens, ["return", "<str>", ";"])
+
+    def test_regex_at_statement_start(self):
+        tokens = [t for _, t in tokenize_code("/^x/.test(s)")]
+        self.assertEqual(tokens, ["<str>", ".", "test", "(", "s", ")"])
+
+    def test_division_not_treated_as_regex(self):
+        tokens = [t for _, t in tokenize_code("a / b / c")]
+        self.assertEqual(tokens, ["a", "/", "b", "/", "c"])
+
+    def test_division_after_closing_paren(self):
+        tokens = [t for _, t in tokenize_code("f() / 2")]
+        self.assertEqual(tokens, ["f", "(", ")", "/", "2"])
+
+    def test_regex_char_class_contains_slash(self):
+        tokens = [t for _, t in tokenize_code("x = /[a/b]/;")]
+        self.assertEqual(tokens, ["x", "=", "<str>", ";"])
+
+    def test_regex_escaped_slash_in_body(self):
+        tokens = [t for _, t in tokenize_code("x = /a\\/b/;")]
+        self.assertEqual(tokens, ["x", "=", "<str>", ";"])
+
+    def test_regex_with_flags(self):
+        tokens = [t for _, t in tokenize_code("x = /abc/gi;")]
+        self.assertEqual(tokens, ["x", "=", "<str>", ";"])
+
+    def test_line_comment_not_mistaken_for_regex(self):
+        tokens = [t for _, t in tokenize_code("x = 1 // /not/ regex\ny")]
+        self.assertEqual(tokens, ["x", "=", "1", "y"])
+
+
 class FileStreamsTests(unittest.TestCase):
     def test_streams_content_field_from_jsonl(self):
         with tempfile.TemporaryDirectory() as tmpdir:
