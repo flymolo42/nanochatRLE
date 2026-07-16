@@ -144,3 +144,46 @@ def apply_kway(stream, plan):
         clause_tokens = clause_tokens_full
         flush()
     return out
+
+
+def collect_predecessor_rank_histograms(id_streams, reference_positions, vocab_size, bins=20):
+    """For each token, histogram of its predecessors' normalized reference ranks
+    (reference_positions[pred] / vocab_size in [0,1]). The predecessor is the
+    previous token in the stream; first-in-stream tokens contribute nothing."""
+    hist = np.zeros((vocab_size, bins), dtype=np.int64)
+    for stream in id_streams:
+        previous = None
+        for _clause, token_id in stream:
+            token_id = int(token_id)
+            if previous is not None:
+                rel = reference_positions[previous] / vocab_size
+                bin_index = min(int(rel * bins), bins - 1)
+                hist[token_id, bin_index] += 1
+            previous = token_id
+    return hist
+
+
+def apply_kway_predrank(stream, plan, reference_positions):
+    """Assign each occurrence of a duplicated token to the copy whose target is
+    nearest its predecessor's normalized reference rank; first-in-stream parent
+    occurrences use the base copy. Non-parents go through the renumber map."""
+    parents = {int(k): v for k, v in plan["parents"].items()}
+    vocab_size = plan["vocab_size_old"]
+    ks = {p: len(info["copies"]) for p, info in parents.items()}
+    renumber = _kway_renumber(vocab_size, sorted(parents), ks)
+    out = []
+    previous = None
+    for clause, token_id in stream:
+        token_id = int(token_id)
+        if token_id in parents:
+            copies = parents[token_id]["copies"]
+            if previous is None:
+                best = copies[0]
+            else:
+                rel = reference_positions[previous] / vocab_size
+                best = min(copies, key=lambda c: (abs(c["target"] - rel), c["new_index"]))
+            out.append((clause, best["new_index"]))
+        else:
+            out.append((clause, int(renumber[token_id])))
+        previous = token_id
+    return out

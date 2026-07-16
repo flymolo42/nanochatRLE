@@ -130,5 +130,52 @@ class BuildAndApplyTests(unittest.TestCase):
         self.assertEqual(len(plan["parents"][1]["copies"]), 2)
 
 
+from scripts.plan_kway_duplicates import apply_kway_predrank, collect_predecessor_rank_histograms
+
+
+class PredecessorRankTests(unittest.TestCase):
+    def test_histogram_bins_predecessor_ranks(self):
+        # reference_positions over vocab_size=4: token 3 is rank 3 (-> ~0.75), token 0 rank 0
+        reference = np.array([0, 1, 2, 3])
+        # stream ids: 9? no; use ids < 4. token 2 preceded by token 3 (rank 3 -> bin 3 of 4)
+        streams = [[(0, 3), (0, 2)]]
+        hist = collect_predecessor_rank_histograms(streams, reference, vocab_size=4, bins=4)
+        # token 2's predecessor is token 3 -> ref rank 3/4=0.75 -> bin 3
+        self.assertEqual(hist[2].tolist(), [0, 0, 0, 1])
+        # token 3 has no predecessor -> contributes nothing
+        self.assertEqual(hist[3].sum(), 0)
+
+    def test_apply_predrank_assigns_by_predecessor_rank(self):
+        # parent token 0 gets 2 copies (fixed_k=2, targets 0.25/0.75); vocab_size 4
+        hist = np.zeros((4, 20), dtype=np.int64)
+        plan = build_plan([0], hist, vocab_size=4, fixed_k=2)
+        reference = np.array([0, 1, 2, 3])  # rank(id)=id
+        # stream: [3, 0, 1, 0] -> occurrence of 0 at pos1 has predecessor 3 (rank .75 -> late copy),
+        # occurrence of 0 at pos3 has predecessor 1 (rank .25 -> early copy)
+        stream = [(0, 3), (0, 0), (0, 1), (0, 0)]
+        out = [nid for _, nid in apply_kway_predrank(stream, plan, reference)]
+        base = plan["parents"][0]["base_new_index"]
+        copies = [c["new_index"] for c in plan["parents"][0]["copies"]]  # [base, base+1] targets .25/.75
+        # renumber: parent 0 -> copies; non-parents 1,3 shift by +1
+        self.assertEqual(out[1], copies[1])  # pred rank .75 -> nearest .75 -> second copy
+        self.assertEqual(out[3], copies[0])  # pred rank .25 -> nearest .25 -> first copy
+
+    def test_apply_predrank_first_token_uses_base_copy(self):
+        hist = np.zeros((4, 20), dtype=np.int64)
+        plan = build_plan([0], hist, vocab_size=4, fixed_k=2)
+        reference = np.array([0, 1, 2, 3])
+        stream = [(0, 0), (0, 1)]  # token 0 is first -> no predecessor -> base copy
+        out = [nid for _, nid in apply_kway_predrank(stream, plan, reference)]
+        self.assertEqual(out[0], plan["parents"][0]["base_new_index"])
+
+    def test_apply_predrank_normalizes_json_keys(self):
+        import json as _json
+        hist = np.zeros((4, 20), dtype=np.int64)
+        plan = _json.loads(_json.dumps(build_plan([0], hist, vocab_size=4, fixed_k=2)))
+        reference = np.array([0, 1, 2, 3])
+        out = apply_kway_predrank([(0, 3), (0, 0)], plan, reference)
+        self.assertEqual(len(out), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
