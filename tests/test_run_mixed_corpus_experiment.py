@@ -12,11 +12,13 @@ def _code():   # different regularity: ids fall
 
 
 class OrderFromTests(unittest.TestCase):
-    def test_order_from_returns_positions_and_fraction(self):
-        positions, frac = order_from(_prose, vocab_size=3, max_passes=5,
-                                     ils_restarts=1, ils_generations=1, jobs=1)
+    def test_order_from_returns_positions_fraction_and_pairs(self):
+        positions, frac, total_pairs = order_from(_prose, vocab_size=3, max_passes=5,
+                                                  ils_restarts=1, ils_generations=1, jobs=1)
         self.assertEqual(sorted(positions.tolist()), [0, 1, 2])
         self.assertGreaterEqual(frac, 0.0)
+        # 20 clauses of 3 ascending tokens -> 2 within-clause pairs each = 40
+        self.assertEqual(total_pairs, 40)
 
 
 class RunExperimentTests(unittest.TestCase):
@@ -30,6 +32,9 @@ class RunExperimentTests(unittest.TestCase):
             self.assertIn("mixed_kway", report[domain])
             self.assertGreater(report[domain]["bespoke"]["chains"], 0)
         self.assertIn("kway_extra_slots", report)
+        # per-corpus pair volumes surfaced (the size-confound quantity)
+        self.assertEqual(set(report["pairs"]), {"prose", "code", "mixed", "mixed_kway"})
+        self.assertEqual(report["pairs"]["mixed"], report["pairs"]["prose"] + report["pairs"]["code"])
 
 
 if __name__ == "__main__":

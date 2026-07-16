@@ -37,8 +37,9 @@ def order_from(id_streams_fn, vocab_size, max_passes, ils_restarts, ils_generati
     order, stats = optimize_order(codes, counts, vocab_size, np.arange(vocab_size, dtype=np.int64),
                                   max_passes=max_passes, ils_restarts=ils_restarts,
                                   ils_generations=ils_generations, ils_seed=1, jobs=jobs)
-    frac = round(stats["ascending_after"] / stats["total_pairs"], 4) if stats["total_pairs"] else 0.0
-    return _inverse_permutation(order), frac
+    total_pairs = int(stats["total_pairs"])
+    frac = round(stats["ascending_after"] / total_pairs, 4) if total_pairs else 0.0
+    return _inverse_permutation(order), frac, total_pairs
 
 
 def measure_domain(id_streams_fn, positions, max_chain_len, plan=None):
@@ -59,10 +60,10 @@ def _both_fn(prose_fn, code_fn):
 def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, vocab_size,
                    top_n, k_max, max_passes, ils_restarts, ils_generations, jobs, max_chain_len):
     kw = dict(max_passes=max_passes, ils_restarts=ils_restarts, ils_generations=ils_generations, jobs=jobs)
-    prose_pos, prose_asc = order_from(prose_train_fn, vocab_size, **kw)
-    code_pos, code_asc = order_from(code_train_fn, vocab_size, **kw)
+    prose_pos, prose_asc, prose_pairs = order_from(prose_train_fn, vocab_size, **kw)
+    code_pos, code_asc, code_pairs = order_from(code_train_fn, vocab_size, **kw)
     both_train_fn = _both_fn(prose_train_fn, code_train_fn)
-    mixed_pos, mixed_asc = order_from(both_train_fn, vocab_size, **kw)
+    mixed_pos, mixed_asc, mixed_pairs = order_from(both_train_fn, vocab_size, **kw)
 
     # k-way plan from the union pair counts + union position histograms
     counter = PairCounter(vocab_size=vocab_size, chunk_size=8_000_000)
@@ -86,6 +87,7 @@ def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, v
         "vocab_size": vocab_size,
         "ascending": {"prose": prose_asc, "code": code_asc, "mixed": mixed_asc,
                       "mixed_kway": round(kstats["ascending_after"] / kstats["total_pairs"], 4) if kstats["total_pairs"] else 0.0},
+        "pairs": {"prose": prose_pairs, "code": code_pairs, "mixed": mixed_pairs, "mixed_kway": int(kstats["total_pairs"])},
         "kway_extra_slots": new_vocab_size - vocab_size,
     }
     for domain, bespoke_pos, eval_fn in (("prose", prose_pos, prose_eval_fn), ("code", code_pos, code_eval_fn)):
