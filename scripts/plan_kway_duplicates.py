@@ -66,3 +66,81 @@ def select_candidates(codes, counts, vocab_size, top_n):
     loss, _ = conflict_losses(codes, counts, vocab_size)
     ranked = np.argsort(-loss, kind="stable")
     return [int(t) for t in ranked if loss[t] > 0][:top_n]
+
+
+from scripts.plan_token_duplicates import renumber_array
+
+
+def build_plan(candidates, histograms, vocab_size, k_max=6, fixed_k=None):
+    ks = {}
+    centroids = {}
+    for old_index in candidates:
+        if fixed_k is not None:
+            k, cents = fixed_k, fixed_centroids(fixed_k)
+        else:
+            k, cents = select_k(histograms[old_index], k_max)
+        if k >= 2:
+            ks[old_index] = k
+            centroids[old_index] = cents
+    parents_sorted = sorted(ks)
+    # each surviving parent adds (k-1) extra slots; extras are inserted directly
+    # after the parent's renumbered index, in index order
+    base_renumber = _kway_renumber(vocab_size, parents_sorted, ks)
+    parents = {}
+    for old_index in parents_sorted:
+        base = int(base_renumber[old_index])
+        k = ks[old_index]
+        copies = [{"new_index": base + offset, "target": round(centroids[old_index][offset], 6)}
+                  for offset in range(k)]
+        parents[old_index] = {"base_new_index": base, "copies": copies}
+    return {
+        "format": "kway_duplicates_plan_v1",
+        "vocab_size_old": vocab_size,
+        "vocab_size_new": vocab_size + sum(ks[p] - 1 for p in parents_sorted),
+        "copies_added": sum(ks[p] - 1 for p in parents_sorted),
+        "k_max": k_max,
+        "fixed_k": fixed_k,
+        "parents": parents,
+    }
+
+
+def _kway_renumber(vocab_size, parents_sorted, ks):
+    # new base index of old id t = t + sum over parents p<t of (k_p - 1)
+    extras = np.zeros(vocab_size, dtype=np.int64)
+    for parent in parents_sorted:
+        extras[parent + 1:] += ks[parent] - 1
+    return np.arange(vocab_size, dtype=np.int64) + extras
+
+
+def apply_kway(stream, plan):
+    parents = {int(k): v for k, v in plan["parents"].items()}
+    vocab_size = plan["vocab_size_old"]
+    ks = {p: len(info["copies"]) for p, info in parents.items()}
+    renumber = _kway_renumber(vocab_size, sorted(parents), ks)
+    out = []
+    clause_tokens = []
+    current = None
+
+    def flush():
+        denom = max(len(clause_tokens) - 1, 1)
+        for position, (clause, token_id) in enumerate(clause_tokens_full):
+            if token_id in parents:
+                rel = position / denom
+                copies = parents[token_id]["copies"]
+                best = min(copies, key=lambda c: (abs(c["target"] - rel), c["new_index"]))
+                out.append((clause, best["new_index"]))
+            else:
+                out.append((clause, int(renumber[token_id])))
+
+    clause_tokens_full = []
+    for clause, token_id in stream:
+        if current is not None and clause != current:
+            clause_tokens = clause_tokens_full
+            flush()
+            clause_tokens_full = []
+        current = clause
+        clause_tokens_full.append((clause, int(token_id)))
+    if clause_tokens_full:
+        clause_tokens = clause_tokens_full
+        flush()
+    return out

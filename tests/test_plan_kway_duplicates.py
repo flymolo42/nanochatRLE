@@ -70,5 +70,40 @@ class FixedAndCandidateTests(unittest.TestCase):
         self.assertEqual(select_candidates(codes, counts, vocab_size, top_n=3), [0, 1, 2])
 
 
+from scripts.plan_kway_duplicates import apply_kway, build_plan
+
+
+class BuildAndApplyTests(unittest.TestCase):
+    def test_build_plan_fixed_k_renumbers_with_gaps(self):
+        hist = np.zeros((4, 20), dtype=np.int64)
+        plan = build_plan([1], hist, vocab_size=4, fixed_k=3)
+        self.assertEqual(plan["vocab_size_old"], 4)
+        self.assertEqual(plan["vocab_size_new"], 6)  # +2 extra copies for parent 1
+        parent = plan["parents"][1]
+        self.assertEqual(parent["base_new_index"], 1)          # parent keeps first slot
+        self.assertEqual([c["new_index"] for c in parent["copies"]], [1, 2, 3])
+        self.assertEqual([round(c["target"], 3) for c in parent["copies"]], [0.167, 0.5, 0.833])
+        # non-parent id 2 renumbers to 2+2=4 (two extra copies inserted before it)
+        stream = [(0, 3), (0, 2)]
+        self.assertEqual([nid for _, nid in apply_kway(stream, plan)], [5, 4])
+
+    def test_apply_assigns_nearest_target(self):
+        # parent 0 with copies at targets ~0.167/0.5/0.833; a 3-token clause of
+        # token 0 at rel-pos 0, .5, 1 -> nearest copies
+        hist = np.zeros((1, 20), dtype=np.int64)
+        plan = build_plan([0], hist, vocab_size=1, fixed_k=3)
+        stream = [(0, 0), (0, 0), (0, 0)]
+        got = [nid for _, nid in apply_kway(stream, plan)]
+        # targets in new-index order: copy0=idx0(0.167), copy1=idx1(0.5), copy2=idx2(0.833)
+        self.assertEqual(got, [0, 1, 2])
+
+    def test_data_driven_k_uses_selected_centroids(self):
+        hist = np.zeros((2, 20), dtype=np.int64)
+        hist[1, 1] = 50
+        hist[1, 18] = 50   # bimodal -> k=2
+        plan = build_plan([1], hist, vocab_size=2, k_max=6)
+        self.assertEqual(len(plan["parents"][1]["copies"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
