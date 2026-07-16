@@ -68,5 +68,15 @@ class RunExperimentTests(unittest.TestCase):
         self.assertLess(report["pairs"]["mixed"], report["pairs"]["prose"])
 
 
+class PredrankMixedTests(unittest.TestCase):
+    def test_report_has_mixed_kway_predrank_per_domain(self):
+        report = run_experiment(_prose, _prose, _code, _code, vocab_size=3,
+                                top_n=3, k_max=4, max_passes=5, ils_restarts=1,
+                                ils_generations=1, jobs=1, max_chain_len=9)
+        for domain in ("prose", "code"):
+            self.assertIn("mixed_kway_predrank", report[domain])
+            self.assertGreater(report[domain]["mixed_kway_predrank"]["chains"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

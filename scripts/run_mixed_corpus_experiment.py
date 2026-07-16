@@ -25,7 +25,9 @@ import numpy as np
 from scripts.code_vocab_experiment import _build_lookup, _stream_ids
 from scripts.measure_chain_lengths import chain_length_histogram, summarize
 from scripts.mixed_corpus_streams import code_file_streams, prose_file_streams, union_census
-from scripts.plan_kway_duplicates import apply_kway, build_plan, collect_position_histograms, select_candidates
+from scripts.plan_kway_duplicates import (apply_kway, apply_kway_predrank, build_plan,
+                                          collect_position_histograms, collect_predecessor_rank_histograms,
+                                          select_candidates)
 from scripts.reorder_phrase_vocab import PairCounter, _inverse_permutation, optimize_order
 
 
@@ -42,10 +44,15 @@ def order_from(id_streams_fn, vocab_size, max_passes, ils_restarts, ils_generati
     return _inverse_permutation(order), frac, total_pairs
 
 
-def measure_domain(id_streams_fn, positions, max_chain_len, plan=None):
+def measure_domain(id_streams_fn, positions, max_chain_len, plan=None, reference_positions=None):
     histogram = {}
     for stream in id_streams_fn():
-        remapped = apply_kway(stream, plan) if plan is not None else stream
+        if plan is None:
+            remapped = stream
+        elif reference_positions is not None:
+            remapped = apply_kway_predrank(stream, plan, reference_positions)
+        else:
+            remapped = apply_kway(stream, plan)
         chain_length_histogram(remapped, positions, reset_on_clause=False,
                                histogram=histogram, max_chain_len=max_chain_len)
     result = summarize(histogram)
@@ -101,6 +108,18 @@ def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, v
                                     ils_seed=1, **kw)
     kway_pos = _inverse_permutation(korder)
 
+    # predecessor-rank k-way arm: reference = the no-dup mixed order (mixed_pos)
+    predrank_hist = collect_predecessor_rank_histograms(both_train_fn(), mixed_pos, vocab_size)
+    predrank_plan = build_plan(candidates, predrank_hist, vocab_size, k_max=k_max)
+    pr_new_vocab = predrank_plan["vocab_size_new"]
+    pr_counter = PairCounter(vocab_size=pr_new_vocab, chunk_size=8_000_000)
+    for stream in both_train_fn():
+        pr_counter.add_stream(apply_kway_predrank(stream, predrank_plan, mixed_pos))
+    prcodes, prcounts = pr_counter.finalize()
+    prorder, _prstats = optimize_order(prcodes, prcounts, pr_new_vocab, np.arange(pr_new_vocab, dtype=np.int64),
+                                       ils_seed=1, **kw)
+    predrank_pos = _inverse_permutation(prorder)
+
     report = {
         "format": "mixed_corpus_experiment_v1",
         "vocab_size": vocab_size,
@@ -108,6 +127,7 @@ def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, v
                       "mixed_kway": round(kstats["ascending_after"] / kstats["total_pairs"], 4) if kstats["total_pairs"] else 0.0},
         "pairs": {"prose": prose_pairs, "code": code_pairs, "mixed": mixed_pairs, "mixed_kway": int(kstats["total_pairs"])},
         "kway_extra_slots": new_vocab_size - vocab_size,
+        "kway_predrank_extra_slots": pr_new_vocab - vocab_size,
         "duplication": [
             {"old_index": int(old_index), "k": len(info["copies"]),
              "targets": [round(c["target"], 3) for c in info["copies"]]}
@@ -121,6 +141,8 @@ def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, v
             "bespoke": measure_domain(eval_fn, bespoke_pos, max_chain_len),
             "mixed": measure_domain(eval_fn, mixed_pos, max_chain_len),
             "mixed_kway": measure_domain(eval_fn, kway_pos, max_chain_len, plan=plan),
+            "mixed_kway_predrank": measure_domain(eval_fn, predrank_pos, max_chain_len,
+                                                  plan=predrank_plan, reference_positions=mixed_pos),
         }
     return report
 
