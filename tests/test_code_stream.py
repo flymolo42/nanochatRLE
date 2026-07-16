@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.code_stream import file_streams, split_identifier, tokenize_code
+from scripts.code_stream import file_streams, is_minified, split_identifier, tokenize_code
 
 
 class SplitIdentifierTests(unittest.TestCase):
@@ -95,6 +95,29 @@ class RegexLiteralTests(unittest.TestCase):
         self.assertEqual(tokens, ["x", "=", "1", "y"])
 
 
+class MinificationFilterTests(unittest.TestCase):
+    def test_normal_multiline_code_not_minified(self):
+        code = "function add(a, b) {\n    return a + b;\n}\n"
+        self.assertFalse(is_minified(code))
+
+    def test_single_giant_line_is_minified(self):
+        code = "var x = [" + ",".join(str(i) for i in range(2000)) + "];"
+        self.assertTrue(is_minified(code))
+
+    def test_one_very_long_line_among_short_is_minified(self):
+        code = "const a = 1;\n" + ("x" * 1500) + "\nconst b = 2;\n"
+        self.assertTrue(is_minified(code))
+
+    def test_high_average_line_length_is_minified(self):
+        # every line ~200 chars -> mean line length > 100 -> minified
+        code = "\n".join(["a" * 200] * 20)
+        self.assertTrue(is_minified(code))
+
+    def test_empty_or_whitespace_not_minified(self):
+        self.assertFalse(is_minified(""))
+        self.assertFalse(is_minified("   \n\n  "))
+
+
 class FileStreamsTests(unittest.TestCase):
     def test_streams_content_field_from_jsonl(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -108,6 +131,20 @@ class FileStreamsTests(unittest.TestCase):
         self.assertEqual(len(streams), 2)
         self.assertEqual(streams[0][0], "0")
         self.assertEqual([t for _, t in streams[0][1]], ["const", "a", "=", "1", ";"])
+
+    def test_streams_skips_minified_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "data.json"
+            good = "const a = 1;"
+            mini = "z=" + "a+" * 600 + "a;"  # one ~1200-char line -> minified
+            path.write_text(
+                json.dumps({"content": good}) + "\n" +
+                json.dumps({"content": mini}) + "\n",
+                encoding="utf-8",
+            )
+            streams = list(file_streams([path]))
+        self.assertEqual(len(streams), 1)
+        self.assertEqual([t for _, t in streams[0][1]][:3], ["const", "a", "="])
 
 
 class UnicodeIdentifierTests(unittest.TestCase):

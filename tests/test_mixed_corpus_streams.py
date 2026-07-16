@@ -21,6 +21,20 @@ class FileStreamTests(unittest.TestCase):
             streams = list(code_file_streams([p]))
         self.assertEqual([t for _, t in streams[0][1]], ["let", "username", "=", "1", ";"])
 
+    def test_code_streams_skips_minified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "d.json"
+            good = "let a = 1;"
+            mini = "z=" + "a+" * 600 + "a;"  # one ~1200-char line -> minified
+            p.write_text(
+                json.dumps({"content": good}) + "\n" +
+                json.dumps({"content": mini}) + "\n",
+                encoding="utf-8",
+            )
+            streams = list(code_file_streams([p]))
+        self.assertEqual(len(streams), 1)
+        self.assertEqual([t for _, t in streams[0][1]], ["let", "a", "=", "1", ";"])
+
 
 class UnionCensusTests(unittest.TestCase):
     def test_shared_symbol_merges_domain_specific_disjoint(self):

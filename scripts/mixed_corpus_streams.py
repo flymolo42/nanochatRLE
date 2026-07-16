@@ -5,11 +5,10 @@ one vocabulary so shared symbols (punctuation, digits) merge while words and
 identifiers stay disjoint.
 """
 
-import json
 from collections import defaultdict
 from pathlib import Path
 
-from scripts.code_stream import tokenize_code
+from scripts.code_stream import file_streams
 from scripts.pg19_stream import tokenize_clauses
 from scripts.phrase_vectors import build_vocab_from_stats
 
@@ -22,16 +21,9 @@ def prose_file_streams(paths):
 
 
 def code_file_streams(paths):
-    for path in paths:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for row_index, line in enumerate(handle):
-                line = line.strip()
-                if not line:
-                    continue
-                content = json.loads(line).get("content")
-                if not content:
-                    continue
-                yield str(row_index), tokenize_code(content, split_identifiers=False)
+    # Delegate to the code tokenizer's reader so minified-record filtering stays
+    # in one place (see scripts.code_stream.file_streams / is_minified).
+    yield from file_streams(paths, split_identifiers=False)
 
 
 def union_census(tagged_stream_iters):
