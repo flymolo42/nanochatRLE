@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import unittest
 
@@ -96,6 +97,30 @@ class BuildAndApplyTests(unittest.TestCase):
         got = [nid for _, nid in apply_kway(stream, plan)]
         # targets in new-index order: copy0=idx0(0.167), copy1=idx1(0.5), copy2=idx2(0.833)
         self.assertEqual(got, [0, 1, 2])
+
+    def test_apply_kway_normalizes_json_stringified_parent_keys(self):
+        # Regression test: verify that apply_kway correctly normalizes plan["parents"]
+        # when keys are strings (from JSON round-trip) vs ints.
+        hist = np.zeros((1, 20), dtype=np.int64)
+        plan = build_plan([0], hist, vocab_size=1, fixed_k=3)
+        stream = [(0, 0), (0, 0), (0, 0)]
+        
+        # Get result from original int-keyed plan
+        result_int_keys = [nid for _, nid in apply_kway(stream, plan)]
+        
+        # Round-trip through JSON (which stringifies integer keys)
+        json_str = json.dumps(plan)
+        plan_str_keys = json.loads(json_str)
+        
+        # Verify keys are now strings
+        self.assertTrue(all(isinstance(k, str) for k in plan_str_keys["parents"].keys()))
+        
+        # Apply to str-keyed plan
+        result_str_keys = [nid for _, nid in apply_kway(stream, plan_str_keys)]
+        
+        # Both should produce identical output (apply_kway normalizes keys internally)
+        self.assertEqual(result_int_keys, result_str_keys)
+        self.assertEqual(result_str_keys, [0, 1, 2])
 
     def test_data_driven_k_uses_selected_centroids(self):
         hist = np.zeros((2, 20), dtype=np.int64)
