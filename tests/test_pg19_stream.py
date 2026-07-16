@@ -32,6 +32,33 @@ class TokenizeClausesTests(unittest.TestCase):
         self.assertEqual(tokenize_clauses("  \n\n  "), [])
 
 
+class UnicodeProseTests(unittest.TestCase):
+    def test_accented_word_stays_whole(self):
+        # café must be ONE token, not caf + é (the fragmentation bug)
+        self.assertEqual(tokenize_clauses("café au lait"),
+                         [(0, "café"), (0, "au"), (0, "lait")])
+
+    def test_accented_word_lowercased_and_whole(self):
+        self.assertEqual(tokenize_clauses("Naïve Zürich"),
+                         [(0, "naïve"), (0, "zürich")])
+
+    def test_non_latin_word_stays_whole(self):
+        self.assertEqual(tokenize_clauses("δοκιμή"), [(0, "δοκιμή")])
+
+    def test_decomposed_accent_normalized_to_nfc(self):
+        # "cafe" + combining acute (NFD) collapses to one precomposed token
+        self.assertEqual(tokenize_clauses("cafe\u0301"), [(0, "caf\u00e9")])
+
+    def test_curly_apostrophe_normalized_and_kept_in_word(self):
+        self.assertEqual(tokenize_clauses("don’t stop"),
+                         [(0, "don't"), (0, "stop")])
+
+    def test_curly_double_quotes_drive_open_close(self):
+        tokens = [t for _, t in tokenize_clauses("“Hi.”")]
+        self.assertEqual(tokens[0], '"')       # curly-open normalized to open
+        self.assertIn('"_close', tokens)       # curly-close normalized to close
+
+
 class BookStreamsTests(unittest.TestCase):
     def test_streams_books_from_txt_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
