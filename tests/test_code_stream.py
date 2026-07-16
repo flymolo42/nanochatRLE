@@ -68,5 +68,30 @@ class FileStreamsTests(unittest.TestCase):
         self.assertEqual([t for _, t in streams[0][1]], ["const", "a", "=", "1", ";"])
 
 
+class UnicodeIdentifierTests(unittest.TestCase):
+    def test_accented_identifier_stays_whole(self):
+        # café must be ONE token, not caf + é (the fragmentation bug)
+        tokens = [t for _, t in tokenize_code("const café = 1;", split_identifiers=False)]
+        self.assertEqual(tokens, ["const", "café", "=", "1", ";"])
+
+    def test_mixed_ascii_unicode_identifier_whole(self):
+        tokens = [t for _, t in tokenize_code("let naïveCount = 2;", split_identifiers=False)]
+        self.assertEqual(tokens, ["const" if False else "let", "naïvecount", "=", "2", ";"])
+
+    def test_non_latin_identifier_whole(self):
+        tokens = [t for _, t in tokenize_code("var δfoo = 3;", split_identifiers=False)]
+        self.assertEqual(tokens, ["var", "δfoo", "=", "3", ";"])
+
+    def test_split_mode_keeps_non_ascii_identifier_whole(self):
+        # camelCase splitting is an ASCII convention; non-ASCII identifiers stay whole (lowercased)
+        self.assertEqual(split_identifier("café"), ["café"])
+        self.assertEqual(split_identifier("größeWert"), ["größewert"])
+        # pure-ASCII camelCase still splits
+        self.assertEqual(split_identifier("getUserName"), ["get", "user", "name"])
+
+    def test_ascii_digits_still_not_identifier_start(self):
+        tokens = [t for _, t in tokenize_code("2fast", split_identifiers=False)]
+        self.assertEqual(tokens, ["2", "fast"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ _MASTER_RE = re.compile(
   | (?P<block_comment>/\*.*?\*/)
   | (?P<string>"(?:\\.|[^"\\])*" | '(?:\\.|[^'\\])*' | `(?:\\.|[^`\\])*`)
   | (?P<number>\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b)
-  | (?P<ident>[A-Za-z_$][A-Za-z0-9_$]*)
+  | (?P<ident>(?:[^\W\d]|[$])[\w$]*)
   | (?P<newline>\n)
   | (?P<op>===|!==|==|!=|<=|>=|=>|&&|\|\||\?\?|\+\+|--|\.\.\.|[+\-*/%=<>!&|^~?:.,;(){}\[\]@])
   | (?P<ws>[^\S\n]+)
@@ -41,6 +41,10 @@ _NO_BREAK_AFTER = set("+-*/%=<>!&|^~?:.,") | {
 
 
 def split_identifier(identifier):
+    # camelCase/snake splitting is an ASCII convention; keep non-ASCII identifiers
+    # whole (lowercased) rather than fragmenting them on ASCII-only case rules
+    if not identifier.isascii():
+        return [identifier.lower()]
     lowered_parts = re.split(r"[_$]+", identifier)
     words = []
     for part in lowered_parts:
