@@ -108,6 +108,11 @@ def run_experiment(prose_train_fn, prose_eval_fn, code_train_fn, code_eval_fn, v
                       "mixed_kway": round(kstats["ascending_after"] / kstats["total_pairs"], 4) if kstats["total_pairs"] else 0.0},
         "pairs": {"prose": prose_pairs, "code": code_pairs, "mixed": mixed_pairs, "mixed_kway": int(kstats["total_pairs"])},
         "kway_extra_slots": new_vocab_size - vocab_size,
+        "duplication": [
+            {"old_index": int(old_index), "k": len(info["copies"]),
+             "targets": [round(c["target"], 3) for c in info["copies"]]}
+            for old_index, info in plan["parents"].items()
+        ],
     }
     if balance is not None:
         report["balance"] = balance
@@ -204,6 +209,10 @@ def main():
                             args.top_n, args.k_max, args.max_passes, args.ils_restarts,
                             args.ils_generations, args.jobs, args.max_chain_len,
                             balance_pairs=args.balance_pairs)
+    # attach the token string for each duplicated id so the report self-documents
+    for entry in report.get("duplication", []):
+        entry["token"] = kept[entry["old_index"]]
+    report["duplication"].sort(key=lambda e: -e["k"])
     report["prose_train_books"] = len(prose_train)
     report["code_train_files"] = len(code_records) - cut
     report["elapsed_seconds"] = round(time.time() - started, 1)

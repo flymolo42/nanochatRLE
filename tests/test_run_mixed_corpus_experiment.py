@@ -45,6 +45,12 @@ class RunExperimentTests(unittest.TestCase):
             self.assertIn("mixed_kway", report[domain])
             self.assertGreater(report[domain]["bespoke"]["chains"], 0)
         self.assertIn("kway_extra_slots", report)
+        # duplication breakdown surfaced: which ids got how many copies
+        self.assertIn("duplication", report)
+        for entry in report["duplication"]:
+            self.assertEqual(set(entry), {"old_index", "k", "targets"})
+            self.assertGreaterEqual(entry["k"], 2)
+            self.assertEqual(len(entry["targets"]), entry["k"])
         # per-corpus pair volumes surfaced (the size-confound quantity)
         self.assertEqual(set(report["pairs"]), {"prose", "code", "mixed", "mixed_kway"})
         self.assertEqual(report["pairs"]["mixed"], report["pairs"]["prose"] + report["pairs"]["code"])
